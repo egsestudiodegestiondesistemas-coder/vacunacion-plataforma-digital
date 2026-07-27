@@ -1,3 +1,7 @@
-streamlit>=1.41,<2.0
-pandas>=2.2,<3.0
-pytest>=8.0,<9.0
+streamlit
+pandas
+requests
+beautifulsoup4
+folium
+streamlit-folium
+streamlit-geolocation
