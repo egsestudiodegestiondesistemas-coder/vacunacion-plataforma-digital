@@ -415,7 +415,7 @@ def source_snapshot(url: str) -> dict:
         response = requests.get(
             url,
             timeout=12,
-            headers={"User-Agent": "VACUNACION-PLATAFORMA-DIGITAL/1.0"},
+            headers={"User-Agent": "VACUNACIÓN-PLATAFORMA-DIGITAL/1.0"},
         )
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
