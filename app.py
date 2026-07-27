@@ -517,13 +517,13 @@ def heading(label: str, title: str, copy: str = "") -> None:
 def render_home() -> None:
     st.markdown(
         """
-        <section class="hero">
-            <h1>VACUNACION PLATAFORMA DIGITAL</h1>
-            <p>
-                Calendario por etapas de la vida, fichas de vacunas,
-                puntos de vacunación y novedades oficiales.
-            </p>
-        </section>
+        <<section class="hero">
+    <h1>VACUNACIÓN PLATAFORMA DIGITAL</h1>
+
+    <p>
+        Información oficial sobre vacunación para todas las etapas de la vida.
+    </p>
+</section>
         """,
         unsafe_allow_html=True,
     )
