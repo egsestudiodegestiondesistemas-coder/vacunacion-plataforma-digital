@@ -520,9 +520,9 @@ def render_home() -> None:
         <<section class="hero">
     <h1>VACUNACIÓN PLATAFORMA DIGITAL</h1>
 
-    <p>
+    
         Información oficial sobre vacunación para todas las etapas de la vida.
-    </p>
+    
 </section>
         """,
         unsafe_allow_html=True,
