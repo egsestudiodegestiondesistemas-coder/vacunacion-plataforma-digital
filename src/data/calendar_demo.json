@@ -1,0 +1,87 @@
+{
+  "meta": {
+    "status": "BORRADOR — NO PUBLICAR",
+    "purpose": "Datos demostrativos de interfaz. No contienen un calendario sanitario oficial.",
+    "version": "0.1.0"
+  },
+  "stages": [
+    {
+      "id": "embarazo",
+      "label": "Embarazo",
+      "icon": "🤰",
+      "description": "Espacio preparado para información oficial validada.",
+      "items": [
+        {
+          "title": "Contenido pendiente de revisión sanitaria",
+          "summary": "La estructura está lista para incorporar recomendaciones oficiales con fuente y fecha.",
+          "status": "draft"
+        }
+      ]
+    },
+    {
+      "id": "recien_nacido",
+      "label": "Recién nacido",
+      "icon": "👶",
+      "description": "Información organizada desde el nacimiento.",
+      "items": [
+        {
+          "title": "Contenido pendiente de revisión sanitaria",
+          "summary": "No se muestran esquemas hasta completar la validación editorial.",
+          "status": "draft"
+        }
+      ]
+    },
+    {
+      "id": "infancia",
+      "label": "Infancia",
+      "icon": "🧒",
+      "description": "Etapa infantil con navegación progresiva.",
+      "items": [
+        {
+          "title": "Contenido pendiente de revisión sanitaria",
+          "summary": "La interfaz admite dosis, edades, notas y fuentes oficiales.",
+          "status": "draft"
+        }
+      ]
+    },
+    {
+      "id": "adolescencia",
+      "label": "Adolescencia",
+      "icon": "🧑",
+      "description": "Información para adolescentes y familias.",
+      "items": [
+        {
+          "title": "Contenido pendiente de revisión sanitaria",
+          "summary": "La información será publicada únicamente después de revisión humana.",
+          "status": "draft"
+        }
+      ]
+    },
+    {
+      "id": "adultez",
+      "label": "Adultez",
+      "icon": "👩",
+      "description": "Orientación por etapa de vida y situaciones especiales.",
+      "items": [
+        {
+          "title": "Contenido pendiente de revisión sanitaria",
+          "summary": "El sistema no infiere vacunas faltantes.",
+          "status": "draft"
+        }
+      ]
+    },
+    {
+      "id": "personas_mayores",
+      "label": "Personas mayores",
+      "icon": "👵",
+      "description": "Acceso claro y accesible a información relevante.",
+      "items": [
+        {
+          "title": "Contenido pendiente de revisión sanitaria",
+          "summary": "La plataforma prioriza legibilidad, contraste y lenguaje claro.",
+          "status": "draft"
+        }
+      ]
+    }
+  ]
+}

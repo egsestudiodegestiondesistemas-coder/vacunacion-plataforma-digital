@@ -1,4 +1,4 @@
-import streamlit as st
+﻿import streamlit as st
 
 def inject_global_styles() -> None:
     st.markdown(
@@ -36,6 +36,18 @@ def inject_global_styles() -> None:
         .page-intro { background:var(--soft); border:1px solid var(--line); border-radius:22px; padding:2rem; margin-bottom:1.4rem; }
         .notice { border-left:4px solid var(--green); background:#F5FBF9; padding:1rem 1.1rem; border-radius:12px; color:var(--navy); margin:1rem 0; }
         .site-footer { margin-top:3rem; border-top:1px solid var(--line); padding-top:1.5rem; color:var(--muted); font-size:.85rem; display:flex; justify-content:space-between; gap:1rem; flex-wrap:wrap; }
+
+        .calendar-stage { display:flex; align-items:center; gap:1.2rem; padding:1.6rem; border:1px solid var(--line); border-radius:20px; background:linear-gradient(135deg,#FFFFFF 0%,#F7FCFD 100%); margin:1.2rem 0; }
+        .calendar-stage-icon { width:64px; height:64px; border-radius:18px; background:var(--blue); display:grid; place-items:center; font-size:2rem; flex:0 0 auto; }
+        .calendar-kicker { color:var(--green-dark); font-size:.72rem; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
+        .calendar-stage h2 { margin:.2rem 0 .35rem; }
+        .calendar-stage p { margin:0; color:var(--muted); }
+        .calendar-item { display:grid; grid-template-columns:20px 1fr; gap:1rem; padding:1.2rem 0; border-bottom:1px solid var(--line); }
+        .calendar-dot { width:12px; height:12px; border-radius:50%; background:var(--green); margin-top:.55rem; box-shadow:0 0 0 5px rgba(44,143,120,.12); }
+        .calendar-item h3 { margin:.35rem 0; }
+        .calendar-item p { color:var(--muted); margin:0; }
+        .draft-badge { display:inline-flex; padding:.25rem .5rem; border-radius:999px; background:#FFF4D6; color:#765A00; font-size:.68rem; font-weight:800; letter-spacing:.06em; }
+
         @media (max-width:850px) {
             .topbar { align-items:flex-start; flex-direction:column; }
             .nav-links { justify-content:flex-start; }
@@ -45,3 +57,4 @@ def inject_global_styles() -> None:
         ''',
         unsafe_allow_html=True,
     )
+
