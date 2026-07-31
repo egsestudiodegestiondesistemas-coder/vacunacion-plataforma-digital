@@ -39,6 +39,8 @@ NOMIVAC_URL = "https://sisa.msal.gov.ar/"
 SUPABASE_REQUESTS_TABLE = "access_requests"
 SUPABASE_USERS_TABLE = "institutional_users"
 SUPABASE_AUDIT_TABLE = "audit_log"
+SUPABASE_CITIZENS_TABLE = "citizens"
+SUPABASE_VACCINATION_RECORDS_TABLE = "vaccination_records"
 
 if "section" not in st.session_state:
     st.session_state.section = "Inicio"
@@ -70,6 +72,10 @@ if "access_requests" not in st.session_state:
     st.session_state.access_requests = []
 if "created_user_credentials" not in st.session_state:
     st.session_state.created_user_credentials = None
+if "nominal_selected_citizen" not in st.session_state:
+    st.session_state.nominal_selected_citizen = None
+if "nominal_last_document" not in st.session_state:
+    st.session_state.nominal_last_document = ""
 
 
 OFFICIAL_SOURCES = [
@@ -4383,6 +4389,317 @@ def _find_access_request(email: str, tracking_code: str) -> tuple[bool, dict | N
     return True, None
 
 
+def _normalize_document(value: str) -> str:
+    """Conserva únicamente caracteres alfanuméricos para búsquedas consistentes."""
+    return re.sub(r"[^0-9A-Za-z]", "", value or "").upper()
+
+
+def _find_citizen(document_type: str, document_number: str) -> tuple[bool, dict | None, str]:
+    normalized_document = _normalize_document(document_number)
+    if not normalized_document:
+        return False, None, "Ingresá un número de documento."
+
+    ok, result = _supabase_rest(
+        "GET",
+        table=SUPABASE_CITIZENS_TABLE,
+        params={
+            "select": "*",
+            "document_type": f"eq.{document_type}",
+            "document_number": f"eq.{normalized_document}",
+            "limit": "1",
+        },
+        admin=True,
+    )
+    if not ok:
+        return False, None, f"No fue posible consultar el registro nominal: {result}"
+    if isinstance(result, list) and result:
+        return True, result[0], ""
+    return True, None, ""
+
+
+def _create_citizen(payload: dict) -> tuple[bool, dict | str]:
+    ok, result = _supabase_rest(
+        "POST",
+        table=SUPABASE_CITIZENS_TABLE,
+        payload=payload,
+        admin=True,
+    )
+    if not ok:
+        return False, f"No fue posible crear el ciudadano: {result}"
+    if isinstance(result, list) and result:
+        return True, result[0]
+    return False, "Supabase no devolvió el registro creado."
+
+
+def _load_vaccination_records(citizen_id: str) -> tuple[bool, list, str]:
+    ok, result = _supabase_rest(
+        "GET",
+        table=SUPABASE_VACCINATION_RECORDS_TABLE,
+        params={
+            "select": "*",
+            "citizen_id": f"eq.{citizen_id}",
+            "order": "application_date.desc,created_at.desc",
+            "limit": "500",
+        },
+        admin=True,
+    )
+    if not ok:
+        return False, [], f"No fue posible cargar el historial: {result}"
+    return True, result if isinstance(result, list) else [], ""
+
+
+def _create_vaccination_record(payload: dict) -> tuple[bool, dict | str]:
+    ok, result = _supabase_rest(
+        "POST",
+        table=SUPABASE_VACCINATION_RECORDS_TABLE,
+        payload=payload,
+        admin=True,
+    )
+    if not ok:
+        return False, f"No fue posible registrar la vacuna: {result}"
+    if isinstance(result, list) and result:
+        return True, result[0]
+    return False, "Supabase no devolvió el registro creado."
+
+
+def render_nominal_registry() -> None:
+    heading(
+        "Gestión institucional",
+        "Registro nominal de vacunación",
+        "Buscá una persona por documento, registrá sus datos y consultá el historial de dosis.",
+    )
+
+    st.markdown(
+        '<div class="data-quality"><strong>Acceso restringido:</strong> este módulo '
+        'maneja datos personales y sanitarios. Utilizalo únicamente con autorización, '
+        'finalidad asistencial o institucional legítima y conforme a la normativa aplicable.</div>',
+        unsafe_allow_html=True,
+    )
+
+    if not _supabase_admin_enabled():
+        st.error(
+            "Falta SUPABASE_SECRET_KEY en Streamlit Secrets. "
+            "El registro nominal requiere acceso seguro desde el servidor."
+        )
+        return
+
+    st.markdown("### 1. Buscar persona")
+    search_col_1, search_col_2, search_col_3 = st.columns([0.7, 1.4, 0.8])
+    with search_col_1:
+        document_type = st.selectbox(
+            "Tipo de documento",
+            ["DNI", "Pasaporte", "Otro"],
+            key="nominal_document_type",
+        )
+    with search_col_2:
+        document_number = st.text_input(
+            "Número de documento",
+            value=st.session_state.nominal_last_document,
+            placeholder="Ingresá el documento sin puntos",
+            key="nominal_document_number",
+        )
+    with search_col_3:
+        st.write("")
+        st.write("")
+        search_clicked = st.button(
+            "Buscar",
+            use_container_width=True,
+            key="nominal_search_button",
+        )
+
+    if search_clicked:
+        normalized = _normalize_document(document_number)
+        st.session_state.nominal_last_document = normalized
+        ok, citizen, error = _find_citizen(document_type, normalized)
+        if not ok:
+            st.error(error)
+        elif citizen:
+            st.session_state.nominal_selected_citizen = citizen
+            st.success("Persona encontrada.")
+            st.rerun()
+        else:
+            st.session_state.nominal_selected_citizen = {
+                "_new": True,
+                "document_type": document_type,
+                "document_number": normalized,
+            }
+            st.info("No existe una persona con ese documento. Podés crearla a continuación.")
+            st.rerun()
+
+    citizen = st.session_state.get("nominal_selected_citizen")
+    if not isinstance(citizen, dict):
+        st.info("Ingresá un documento para comenzar.")
+        return
+
+    if citizen.get("_new"):
+        st.markdown("### 2. Crear persona")
+        with st.form("nominal_create_citizen_form", clear_on_submit=False):
+            c1, c2 = st.columns(2)
+            with c1:
+                first_name = st.text_input("Nombre")
+                birth_date = st.date_input(
+                    "Fecha de nacimiento",
+                    value=None,
+                    min_value=datetime(1900, 1, 1).date(),
+                    max_value=datetime.now().date(),
+                )
+                phone = st.text_input("Teléfono")
+                address = st.text_input("Domicilio")
+            with c2:
+                last_name = st.text_input("Apellido")
+                sex_registered = st.selectbox(
+                    "Sexo registrado",
+                    ["No informado", "Femenino", "Masculino", "X / Otro"],
+                )
+                email = st.text_input("Correo electrónico")
+                locality = st.text_input("Localidad", value="San Francisco")
+            observations = st.text_area("Observaciones", height=90)
+            create_person = st.form_submit_button(
+                "Crear persona",
+                use_container_width=True,
+            )
+
+        if create_person:
+            if not first_name.strip() or not last_name.strip() or birth_date is None:
+                st.error("Completá nombre, apellido y fecha de nacimiento.")
+            elif email.strip() and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email.strip()):
+                st.error("El correo electrónico no tiene un formato válido.")
+            else:
+                payload = {
+                    "document_type": str(citizen.get("document_type", "DNI")),
+                    "document_number": _normalize_document(str(citizen.get("document_number", ""))),
+                    "first_name": first_name.strip(),
+                    "last_name": last_name.strip(),
+                    "birth_date": birth_date.isoformat(),
+                    "sex_registered": None if sex_registered == "No informado" else sex_registered,
+                    "phone": phone.strip() or None,
+                    "email": email.strip().lower() or None,
+                    "address": address.strip() or None,
+                    "locality": locality.strip() or None,
+                    "province": "Córdoba",
+                    "observations": observations.strip() or None,
+                }
+                ok, result = _create_citizen(payload)
+                if ok and isinstance(result, dict):
+                    st.session_state.nominal_selected_citizen = result
+                    _record_audit(
+                        "Crear ciudadano",
+                        "citizen",
+                        str(result.get("id", "")),
+                        {"document_type": payload["document_type"], "document_number": payload["document_number"]},
+                    )
+                    st.success("Persona creada correctamente.")
+                    st.rerun()
+                else:
+                    st.error(str(result))
+        return
+
+    citizen_id = str(citizen.get("id", ""))
+    if not citizen_id:
+        st.error("El registro seleccionado no contiene un identificador válido.")
+        return
+
+    full_name = f"{citizen.get('last_name', '')}, {citizen.get('first_name', '')}".strip(", ")
+    st.markdown("### Persona seleccionada")
+    st.markdown(
+        '<section class="technical-sheet">'
+        f'<h3>{escape(full_name or "Sin nombre")}</h3>'
+        '<div class="technical-grid">'
+        f'<div class="technical-field"><span>Documento</span><strong>{escape(str(citizen.get("document_type", "")))} {escape(str(citizen.get("document_number", "")))}</strong></div>'
+        f'<div class="technical-field"><span>Fecha de nacimiento</span><strong>{escape(str(citizen.get("birth_date", "")))}</strong></div>'
+        f'<div class="technical-field"><span>Localidad</span><strong>{escape(str(citizen.get("locality") or "No informada"))}</strong></div>'
+        f'<div class="technical-field"><span>Contacto</span><strong>{escape(str(citizen.get("phone") or citizen.get("email") or "No informado"))}</strong></div>'
+        '</div></section>',
+        unsafe_allow_html=True,
+    )
+
+    if st.button("Buscar otra persona", use_container_width=True, key="nominal_clear_selection"):
+        st.session_state.nominal_selected_citizen = None
+        st.session_state.nominal_last_document = ""
+        st.rerun()
+
+    st.markdown("### 2. Registrar aplicación")
+    with st.form("nominal_vaccination_form", clear_on_submit=True):
+        r1, r2, r3 = st.columns(3)
+        with r1:
+            vaccine_name = st.selectbox("Vacuna", sorted({item["name"] for item in VACCINES}) + ["Otra"])
+            dose_number = st.text_input("Dosis", placeholder="Ej.: 1.ª dosis, refuerzo, dosis anual")
+            application_date = st.date_input("Fecha de aplicación", value=datetime.now().date(), max_value=datetime.now().date())
+        with r2:
+            batch_number = st.text_input("Lote")
+            expiration_date = st.date_input("Vencimiento del lote", value=None)
+            laboratory = st.text_input("Laboratorio")
+        with r3:
+            establishment = st.text_input("Establecimiento")
+            locality_record = st.text_input("Localidad de aplicación", value=str(citizen.get("locality") or "San Francisco"))
+            administration_route = st.selectbox("Vía de administración", ["No informada", "Intramuscular", "Subcutánea", "Intradérmica", "Oral", "Otra"])
+
+        r4, r5 = st.columns(2)
+        with r4:
+            anatomical_site = st.text_input("Sitio anatómico", placeholder="Ej.: deltoides derecho")
+            vaccinator_name = st.text_input("Nombre del vacunador/a", value=str(st.session_state.get("institutional_user") or ""))
+        with r5:
+            vaccinator_registration = st.text_input("Matrícula")
+            record_observations = st.text_area("Observaciones", height=90)
+
+        confirm_record = st.checkbox("Confirmo que verifiqué identidad, vacuna, dosis, lote y fecha antes de registrar.")
+        save_record = st.form_submit_button("Registrar vacuna", use_container_width=True)
+
+    if save_record:
+        if not dose_number.strip() or not establishment.strip():
+            st.error("Completá dosis y establecimiento.")
+        elif not batch_number.strip():
+            st.error("Ingresá el número de lote.")
+        elif not confirm_record:
+            st.error("Debés confirmar la verificación previa.")
+        else:
+            payload = {
+                "citizen_id": citizen_id,
+                "vaccine_name": vaccine_name,
+                "dose_number": dose_number.strip(),
+                "application_date": application_date.isoformat(),
+                "batch_number": batch_number.strip(),
+                "expiration_date": expiration_date.isoformat() if expiration_date else None,
+                "laboratory": laboratory.strip() or None,
+                "establishment": establishment.strip(),
+                "locality": locality_record.strip() or None,
+                "province": "Córdoba",
+                "administration_route": None if administration_route == "No informada" else administration_route,
+                "anatomical_site": anatomical_site.strip() or None,
+                "vaccinator_name": vaccinator_name.strip() or None,
+                "vaccinator_registration": vaccinator_registration.strip() or None,
+                "observations": record_observations.strip() or None,
+            }
+            ok, result = _create_vaccination_record(payload)
+            if ok and isinstance(result, dict):
+                _record_audit(
+                    "Registrar vacuna",
+                    "vaccination_record",
+                    str(result.get("id", "")),
+                    {"citizen_id": citizen_id, "vaccine_name": vaccine_name, "dose_number": dose_number.strip()},
+                )
+                st.success("Vacuna registrada correctamente.")
+                st.rerun()
+            else:
+                st.error(str(result))
+
+    st.markdown("### 3. Historial de vacunación")
+    history_ok, records, history_error = _load_vaccination_records(citizen_id)
+    if not history_ok:
+        st.error(history_error)
+    elif not records:
+        st.info("La persona todavía no tiene aplicaciones registradas.")
+    else:
+        history_rows = [{
+            "Fecha": record.get("application_date", ""),
+            "Vacuna": record.get("vaccine_name", ""),
+            "Dosis": record.get("dose_number", ""),
+            "Lote": record.get("batch_number", ""),
+            "Establecimiento": record.get("establishment", ""),
+            "Vacunador/a": record.get("vaccinator_name", ""),
+        } for record in records]
+        st.dataframe(pd.DataFrame(history_rows), use_container_width=True, hide_index=True)
+
 def _institutional_users() -> dict:
     """Lee usuarios institucionales desde .streamlit/secrets.toml sin exponer credenciales."""
     try:
@@ -4685,7 +5002,7 @@ def render_professional_portal() -> None:
 
         workspace_col, logout_col = st.columns([4, 1])
         with workspace_col:
-            workspace_options = ["Área técnica", "Inteligencia sanitaria"]
+            workspace_options = ["Área técnica", "Registro nominal", "Inteligencia sanitaria"]
             workspace_index = workspace_options.index(st.session_state.professional_workspace)
             workspace_selected = st.selectbox(
                 "Espacio de trabajo",
@@ -4707,6 +5024,8 @@ def render_professional_portal() -> None:
 
         if st.session_state.professional_workspace == "Área técnica":
             render_professional_area()
+        elif st.session_state.professional_workspace == "Registro nominal":
+            render_nominal_registry()
         else:
             render_health_intelligence_area()
 
@@ -5023,8 +5342,9 @@ st.markdown(
         <strong>{DEVELOPER}</strong><br>
         Última revisión de contenidos: {LAST_CONTENT_REVIEW}<br><br>
         Esta plataforma integra orientación ciudadana, consulta profesional y arquitectura de inteligencia sanitaria basada en fuentes oficiales.
-        No constituye una historia clínica, no reemplaza la consulta profesional y
-        no accede directamente a bases nominales de SIGIPSA, NOMIVAC, CiDi o Mi Argentina.
+        El Portal Ciudadano no almacena datos clínicos. El Registro Nominal es un módulo institucional
+        restringido y no reemplaza la historia clínica ni los sistemas oficiales.
+        La plataforma no accede directamente a SIGIPSA, NOMIVAC, CiDi o Mi Argentina.
     </div>
     """,
     unsafe_allow_html=True,
