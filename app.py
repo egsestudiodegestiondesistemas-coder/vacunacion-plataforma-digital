@@ -2513,17 +2513,30 @@ def nav() -> None:
     portal_labels = ["Profesionales e instituciones"]
     all_labels = citizen_labels + portal_labels
 
-    # Navegación compacta para teléfonos. CSS la oculta en escritorio.
-    current_index = all_labels.index(st.session_state.section) if st.session_state.section in all_labels else 0
-    mobile_selected = st.selectbox(
+    if st.session_state.section not in all_labels:
+        st.session_state.section = "Inicio"
+
+    if (
+        "mobile_navigation" not in st.session_state
+        or st.session_state.mobile_navigation not in all_labels
+    ):
+        st.session_state.mobile_navigation = st.session_state.section
+
+    def change_mobile_section() -> None:
+        selected = st.session_state.mobile_navigation
+        if selected in all_labels:
+            st.session_state.section = selected
+
+    def open_section(label: str) -> None:
+        st.session_state.section = label
+        st.session_state.mobile_navigation = label
+
+    st.selectbox(
         "Sección",
         all_labels,
-        index=current_index,
         key="mobile_navigation",
+        on_change=change_mobile_section,
     )
-    if mobile_selected != st.session_state.section:
-        st.session_state.section = mobile_selected
-        st.rerun()
 
     st.markdown(
         '<div class="section-label desktop-nav-label">Portal ciudadano</div>',
@@ -2533,28 +2546,28 @@ def nav() -> None:
         citizen_cols = st.columns(4)
         for index, label in enumerate(citizen_labels):
             with citizen_cols[index % 4]:
-                if st.button(
+                st.button(
                     label,
                     use_container_width=True,
                     key=f"nav_{label}",
                     disabled=st.session_state.section == label,
-                ):
-                    st.session_state.section = label
-                    st.rerun()
+                    on_click=open_section,
+                    args=(label,),
+                )
 
     st.markdown(
         '<div class="section-label desktop-nav-label" style="margin-top:0.8rem">Portales especializados</div>',
         unsafe_allow_html=True,
     )
     with st.container(key="desktop_professional_navigation"):
-        if st.button(
+        st.button(
             portal_labels[0],
             use_container_width=True,
             key=f"nav_{portal_labels[0]}",
             disabled=st.session_state.section == portal_labels[0],
-        ):
-            st.session_state.section = portal_labels[0]
-            st.rerun()
+            on_click=open_section,
+            args=(portal_labels[0],),
+        )
 
 
 def heading(label: str, title: str, copy: str = "") -> None:
@@ -2594,9 +2607,15 @@ def render_home() -> None:
                 f'<div class="vaccine-card" style="border-top:5px solid {accent}"><h3>{title}</h3><p>{desc}</p></div>',
                 unsafe_allow_html=True,
             )
-            if st.button(f"Abrir {title}", key=f"home_{title}", use_container_width=True):
-                st.session_state.section = title
-                st.rerun()
+            st.button(
+                f"Abrir {title}",
+                key=f"home_{title}",
+                use_container_width=True,
+                on_click=lambda destination=title: (
+                    st.session_state.__setitem__("section", destination),
+                    st.session_state.__setitem__("mobile_navigation", destination),
+                ),
+            )
 
 
 
