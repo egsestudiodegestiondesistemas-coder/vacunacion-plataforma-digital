@@ -34,6 +34,7 @@ CORDOBA_VACCINATION_URL = "https://vacunacion.cba.gov.ar/Vacunas"
 MI_ARGENTINA_URL = "https://www.argentina.gob.ar/miargentina"
 SIGIPSA_URL = "https://www.sigipsa.com.ar/"
 NOMIVAC_URL = "https://sisa.msal.gov.ar/"
+SUPABASE_REQUESTS_TABLE = "access_requests"
 
 if "section" not in st.session_state:
     st.session_state.section = "Inicio"
@@ -4037,6 +4038,122 @@ def render_sources() -> None:
             st.link_button("Abrir fuente", source["url"], key=f"source_{source['name']}")
 
 
+
+def _supabase_config() -> tuple[str, str]:
+    """Obtiene URL y clave publicable desde Streamlit Secrets."""
+    try:
+        url = str(st.secrets.get("SUPABASE_URL", "")).strip().rstrip("/")
+        key = str(st.secrets.get("SUPABASE_ANON_KEY", "")).strip()
+        return url, key
+    except Exception:
+        return "", ""
+
+
+def _supabase_enabled() -> bool:
+    url, key = _supabase_config()
+    return bool(url and key)
+
+
+def _supabase_rest(
+    method: str,
+    *,
+    params: dict | None = None,
+    payload: dict | None = None,
+) -> tuple[bool, object]:
+    """Opera sobre access_requests mediante la API REST de Supabase."""
+    url, key = _supabase_config()
+    if not url or not key:
+        return False, "Faltan SUPABASE_URL o SUPABASE_ANON_KEY en Streamlit Secrets."
+
+    headers = {
+        "apikey": key,
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
+
+    try:
+        response = requests.request(
+            method,
+            f"{url}/rest/v1/{SUPABASE_REQUESTS_TABLE}",
+            headers=headers,
+            params=params,
+            json=payload,
+            timeout=15,
+        )
+        response.raise_for_status()
+        if not response.text:
+            return True, None
+        return True, response.json()
+    except requests.RequestException as exc:
+        detail = ""
+        if getattr(exc, "response", None) is not None:
+            detail = exc.response.text[:700]
+        return False, detail or str(exc)
+
+
+def _tracking_code(email: str) -> str:
+    seed = f"{email.strip().lower()}-{datetime.now(timezone.utc).isoformat()}"
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8].upper()
+    return f"VAC-{digest}"
+
+
+def _save_access_request(request_data: dict) -> tuple[bool, str]:
+    ok, result = _supabase_rest("POST", payload=request_data)
+    if ok:
+        return True, "La solicitud fue registrada y quedó pendiente de revisión."
+    return False, f"No fue posible guardar la solicitud en Supabase: {result}"
+
+
+def _load_access_requests() -> tuple[bool, list]:
+    ok, result = _supabase_rest(
+        "GET",
+        params={
+            "select": "*",
+            "order": "created_at.desc",
+            "limit": "500",
+        },
+    )
+    if not ok:
+        return False, []
+    return True, result if isinstance(result, list) else []
+
+
+def _update_access_request(
+    request_id: object,
+    status: str,
+    review_note: str,
+) -> tuple[bool, str]:
+    ok, result = _supabase_rest(
+        "PATCH",
+        params={"id": f"eq.{request_id}"},
+        payload={
+            "estado": status,
+            "nota_revision": review_note.strip(),
+            "reviewed_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    if ok:
+        return True, "Estado actualizado."
+    return False, f"No fue posible actualizar la solicitud: {result}"
+
+
+def _find_access_request(email: str, tracking_code: str) -> tuple[bool, dict | None]:
+    ok, result = _supabase_rest(
+        "GET",
+        params={
+            "select": "codigo_seguimiento,estado,perfil,request_type,created_at,nota_revision",
+            "correo": f"eq.{email.strip().lower()}",
+            "codigo_seguimiento": f"eq.{tracking_code.strip().upper()}",
+            "limit": "1",
+        },
+    )
+    if not ok:
+        return False, None
+    if isinstance(result, list) and result:
+        return True, result[0]
+    return True, None
+
+
 def _institutional_users() -> dict:
     """Lee usuarios institucionales desde .streamlit/secrets.toml sin exponer credenciales."""
     try:
@@ -4102,7 +4219,7 @@ def render_professional_portal() -> None:
                 '<p>Solicitá autorización para acceder a inteligencia sanitaria, indicadores, reportes y herramientas de gestión.</p></article>',
                 unsafe_allow_html=True,
             )
-            if st.button("Solicitar acceso institucional", use_container_width=True, key="request_institutional_access"):
+            if st.button("Registrarme", use_container_width=True, key="request_institutional_access"):
                 st.session_state.professional_access_view = "Solicitud"
                 st.rerun()
 
@@ -4118,49 +4235,153 @@ def render_professional_portal() -> None:
         return
 
     if st.session_state.professional_access_view == "Solicitud":
-        heading("Acceso institucional", "Solicitud de autorización", "La solicitud será evaluada antes de habilitar una cuenta.")
+        heading(
+            "Registro",
+            "Solicitud de acceso",
+            "Profesionales e instituciones pueden registrarse. La cuenta se habilita únicamente después de la revisión administrativa.",
+        )
+
+        request_type = st.radio(
+            "Tipo de solicitud",
+            ["Profesional", "Institución"],
+            horizontal=True,
+            key="access_request_type",
+        )
+
         with st.form("institutional_request_form", clear_on_submit=False):
             col1, col2 = st.columns(2)
             with col1:
-                full_name = st.text_input("Nombre y apellido")
+                full_name = st.text_input("Nombre y apellido del responsable")
                 email = st.text_input("Correo electrónico")
+                phone = st.text_input("Teléfono")
                 profession = st.text_input("Profesión, función o cargo")
             with col2:
-                institution = st.text_input("Institución")
-                registration = st.text_input("Matrícula o identificación institucional")
+                institution = st.text_input(
+                    "Institución" if request_type == "Profesional"
+                    else "Nombre legal de la institución"
+                )
+                registration = st.text_input(
+                    "Matrícula profesional" if request_type == "Profesional"
+                    else "CUIT o identificación institucional"
+                )
+                jurisdiction = st.text_input("Provincia, municipio o jurisdicción")
                 requested_role = st.selectbox(
                     "Perfil solicitado",
-                    ["Profesional", "Referente institucional", "Gestor sanitario", "Administrador institucional"],
+                    (
+                        ["Profesional", "Vacunador/a", "Referente de inmunizaciones"]
+                        if request_type == "Profesional"
+                        else [
+                            "Referente institucional",
+                            "Gestor sanitario",
+                            "Administrador institucional",
+                        ]
+                    ),
                 )
+
+            sigipsa_interest = st.checkbox(
+                "Solicito orientación para el acceso institucional a SIGIPSA."
+            )
             reason = st.text_area("Motivo de la solicitud", height=110)
-            confirm = st.checkbox("Declaro que la información consignada es correcta.")
-            submitted = st.form_submit_button("Enviar solicitud", use_container_width=True)
+            confirm = st.checkbox(
+                "Declaro que la información consignada es correcta y autorizo su revisión administrativa."
+            )
+            submitted = st.form_submit_button(
+                "Enviar solicitud",
+                use_container_width=True,
+            )
 
         if submitted:
-            required = [full_name.strip(), email.strip(), profession.strip(), institution.strip(), reason.strip()]
+            required = [
+                full_name.strip(),
+                email.strip(),
+                profession.strip(),
+                institution.strip(),
+                jurisdiction.strip(),
+                reason.strip(),
+            ]
             if not all(required):
-                st.error("Completá los campos obligatorios antes de enviar la solicitud.")
-            elif "@" not in email:
+                st.error("Completá todos los campos obligatorios antes de enviar la solicitud.")
+            elif not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email.strip()):
                 st.error("Ingresá un correo electrónico válido.")
             elif not confirm:
-                st.error("Debés confirmar la declaración para enviar la solicitud.")
+                st.error("Debés aceptar la declaración para enviar la solicitud.")
+            elif not _supabase_enabled():
+                st.error(
+                    "Supabase no está configurado. Revisá SUPABASE_URL y "
+                    "SUPABASE_ANON_KEY en Streamlit Secrets."
+                )
             else:
-                request = {
+                tracking_code = _tracking_code(email)
+                request_data = {
+                    "request_type": request_type,
                     "nombre": full_name.strip(),
                     "correo": email.strip().lower(),
+                    "telefono": phone.strip(),
                     "profesion": profession.strip(),
                     "institucion": institution.strip(),
                     "matricula": registration.strip(),
+                    "jurisdiccion": jurisdiction.strip(),
                     "perfil": requested_role,
+                    "sigipsa_interest": bool(sigipsa_interest),
                     "motivo": reason.strip(),
                     "estado": "Pendiente",
+                    "codigo_seguimiento": tracking_code,
                     "fecha": datetime.now().astimezone().strftime("%d/%m/%Y %H:%M"),
                 }
-                st.session_state.access_requests.append(request)
-                st.success("La solicitud fue registrada con estado pendiente de revisión.")
-                st.info("En producción, este registro debe guardarse en una base de datos y notificarse a la administración.")
+                ok, message = _save_access_request(request_data)
+                if ok:
+                    st.success(message)
+                    st.markdown("**Código de seguimiento**")
+                    st.code(tracking_code, language=None)
+                    st.info(
+                        "Guardá este código. Lo necesitarás junto con tu correo "
+                        "para consultar el estado."
+                    )
+                else:
+                    st.error(message)
 
-        if st.button("Volver a la bienvenida", use_container_width=True, key="request_back"):
+        with st.expander("Consultar el estado de una solicitud", expanded=False):
+            status_email = st.text_input(
+                "Correo utilizado en el registro",
+                key="status_request_email",
+            )
+            status_code = st.text_input(
+                "Código de seguimiento",
+                key="status_request_code",
+            )
+            if st.button(
+                "Consultar estado",
+                use_container_width=True,
+                key="check_request_status",
+            ):
+                if not status_email.strip() or not status_code.strip():
+                    st.warning("Ingresá el correo y el código de seguimiento.")
+                else:
+                    ok, status_data = _find_access_request(
+                        status_email,
+                        status_code,
+                    )
+                    if not ok:
+                        st.error("No fue posible consultar el estado.")
+                    elif not status_data:
+                        st.warning("No se encontró una solicitud con esos datos.")
+                    else:
+                        st.success(
+                            f"Estado: {status_data.get('estado', 'Pendiente')}"
+                        )
+                        st.write(
+                            f"Perfil solicitado: "
+                            f"{status_data.get('perfil', 'No informado')}"
+                        )
+                        note = str(status_data.get("nota_revision") or "").strip()
+                        if note:
+                            st.info(f"Observación administrativa: {note}")
+
+        if st.button(
+            "Volver a la bienvenida",
+            use_container_width=True,
+            key="request_back",
+        ):
             st.session_state.professional_access_view = "Bienvenida"
             st.rerun()
         return
@@ -4251,30 +4472,83 @@ def render_professional_portal() -> None:
         if st.session_state.institutional_role == "Superadministradora":
             st.divider()
             heading("Administración", "Solicitudes de acceso")
-            if not st.session_state.access_requests:
-                st.info("No hay solicitudes registradas durante esta sesión.")
+
+            ok, requests_list = _load_access_requests()
+            if not ok:
+                st.error("No fue posible cargar las solicitudes desde Supabase.")
+            elif not requests_list:
+                st.info("No hay solicitudes registradas.")
             else:
-                for index, request in enumerate(st.session_state.access_requests):
-                    with st.expander(f"{request['nombre']} · {request['institucion']} · {request['estado']}"):
-                        st.write(f"Correo: {request['correo']}")
-                        st.write(f"Profesión o cargo: {request['profesion']}")
-                        st.write(f"Matrícula o identificación: {request['matricula'] or 'No informada'}")
-                        st.write(f"Perfil solicitado: {request['perfil']}")
-                        st.write(f"Motivo: {request['motivo']}")
-                        st.write(f"Fecha: {request['fecha']}")
+                for index, request in enumerate(requests_list):
+                    request_id = request.get("id")
+                    title = (
+                        f"{request.get('nombre', 'Sin nombre')} · "
+                        f"{request.get('institucion', 'Sin institución')} · "
+                        f"{request.get('estado', 'Pendiente')}"
+                    )
+                    with st.expander(title):
+                        st.write(
+                            f"Tipo: {request.get('request_type', 'No informado')}"
+                        )
+                        st.write(f"Correo: {request.get('correo', '')}")
+                        st.write(
+                            f"Teléfono: {request.get('telefono') or 'No informado'}"
+                        )
+                        st.write(
+                            f"Profesión o cargo: {request.get('profesion', '')}"
+                        )
+                        st.write(
+                            "Matrícula o identificación: "
+                            f"{request.get('matricula') or 'No informada'}"
+                        )
+                        st.write(
+                            f"Jurisdicción: "
+                            f"{request.get('jurisdiccion') or 'No informada'}"
+                        )
+                        st.write(
+                            f"Perfil solicitado: {request.get('perfil', '')}"
+                        )
+                        st.write(
+                            "Interés SIGIPSA: "
+                            + ("Sí" if request.get("sigipsa_interest") else "No")
+                        )
+                        st.write(f"Motivo: {request.get('motivo', '')}")
+                        st.write(
+                            f"Código: "
+                            f"{request.get('codigo_seguimiento', 'No disponible')}"
+                        )
+
+                        review_note = st.text_area(
+                            "Observación administrativa",
+                            value=str(request.get("nota_revision") or ""),
+                            key=f"review_note_{index}_{request_id}",
+                            height=80,
+                        )
+
                         a, b, c = st.columns(3)
-                        with a:
-                            if st.button("Aprobar", key=f"approve_request_{index}", use_container_width=True):
-                                st.session_state.access_requests[index]["estado"] = "Aprobada"
-                                st.rerun()
-                        with b:
-                            if st.button("Solicitar información", key=f"review_request_{index}", use_container_width=True):
-                                st.session_state.access_requests[index]["estado"] = "Requiere información"
-                                st.rerun()
-                        with c:
-                            if st.button("Rechazar", key=f"reject_request_{index}", use_container_width=True):
-                                st.session_state.access_requests[index]["estado"] = "Rechazada"
-                                st.rerun()
+                        actions = [
+                            (a, "Aprobar", "Aprobada"),
+                            (b, "Solicitar información", "Requiere información"),
+                            (c, "Rechazar", "Rechazada"),
+                        ]
+
+                        for column, label, status in actions:
+                            with column:
+                                if st.button(
+                                    label,
+                                    key=f"request_{status}_{index}_{request_id}",
+                                    use_container_width=True,
+                                ):
+                                    update_ok, update_message = _update_access_request(
+                                        request_id,
+                                        status,
+                                        review_note,
+                                    )
+                                    if update_ok:
+                                        st.success(update_message)
+                                        st.rerun()
+                                    else:
+                                        st.error(update_message)
         return
 
     st.session_state.professional_access_view = "Bienvenida"
