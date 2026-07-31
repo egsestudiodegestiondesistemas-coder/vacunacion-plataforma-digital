@@ -4462,6 +4462,33 @@ def _create_vaccination_record(payload: dict) -> tuple[bool, dict | str]:
     return False, "Supabase no devolvió el registro creado."
 
 
+def _parse_iso_date(value: object):
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_duplicate_vaccination(payload: dict, records: list) -> bool:
+    """Detecta una aplicación idéntica para evitar cargas duplicadas accidentales."""
+    target = (
+        str(payload.get("vaccine_name", "")).strip().casefold(),
+        str(payload.get("dose_number", "")).strip().casefold(),
+        str(payload.get("application_date", "")).strip(),
+        str(payload.get("batch_number", "")).strip().casefold(),
+    )
+    for record in records:
+        current = (
+            str(record.get("vaccine_name", "")).strip().casefold(),
+            str(record.get("dose_number", "")).strip().casefold(),
+            str(record.get("application_date", "")).strip(),
+            str(record.get("batch_number", "")).strip().casefold(),
+        )
+        if current == target:
+            return True
+    return False
+
+
 def render_nominal_registry() -> None:
     heading(
         "Gestión institucional",
@@ -4613,16 +4640,39 @@ def render_nominal_registry() -> None:
         unsafe_allow_html=True,
     )
 
+    birth_date_value = _parse_iso_date(citizen.get("birth_date"))
+    if birth_date_value:
+        today = datetime.now().date()
+        age_years = today.year - birth_date_value.year - (
+            (today.month, today.day) < (birth_date_value.month, birth_date_value.day)
+        )
+        st.caption(f"Edad calculada al día de hoy: {age_years} años.")
+
     if st.button("Buscar otra persona", use_container_width=True, key="nominal_clear_selection"):
         st.session_state.nominal_selected_citizen = None
         st.session_state.nominal_last_document = ""
         st.rerun()
 
+    history_ok, records, history_error = _load_vaccination_records(citizen_id)
+    if not history_ok:
+        st.error(history_error)
+        records = []
+
     st.markdown("### 2. Registrar aplicación")
+    st.caption(
+        "El sistema controla fecha de nacimiento, vencimiento de lote y posibles duplicados antes de guardar."
+    )
     with st.form("nominal_vaccination_form", clear_on_submit=True):
         r1, r2, r3 = st.columns(3)
         with r1:
-            vaccine_name = st.selectbox("Vacuna", sorted({item["name"] for item in VACCINES}) + ["Otra"])
+            vaccine_option = st.selectbox("Vacuna", sorted({item["name"] for item in VACCINES}) + ["Otra"])
+            other_vaccine_name = ""
+            if vaccine_option == "Otra":
+                other_vaccine_name = st.text_input(
+                    "Nombre de la vacuna",
+                    placeholder="Ingresá la denominación exacta",
+                )
+            vaccine_name = other_vaccine_name.strip() if vaccine_option == "Otra" else vaccine_option
             dose_number = st.text_input("Dosis", placeholder="Ej.: 1.ª dosis, refuerzo, dosis anual")
             application_date = st.date_input("Fecha de aplicación", value=datetime.now().date(), max_value=datetime.now().date())
         with r2:
@@ -4646,10 +4696,16 @@ def render_nominal_registry() -> None:
         save_record = st.form_submit_button("Registrar vacuna", use_container_width=True)
 
     if save_record:
-        if not dose_number.strip() or not establishment.strip():
+        if not vaccine_name:
+            st.error("Ingresá el nombre de la vacuna.")
+        elif not dose_number.strip() or not establishment.strip():
             st.error("Completá dosis y establecimiento.")
         elif not batch_number.strip():
             st.error("Ingresá el número de lote.")
+        elif birth_date_value and application_date < birth_date_value:
+            st.error("La fecha de aplicación no puede ser anterior a la fecha de nacimiento.")
+        elif expiration_date and expiration_date < application_date:
+            st.error("El lote figura vencido para la fecha de aplicación. Verificá las fechas antes de continuar.")
         elif not confirm_record:
             st.error("Debés confirmar la verificación previa.")
         else:
@@ -4670,21 +4726,26 @@ def render_nominal_registry() -> None:
                 "vaccinator_registration": vaccinator_registration.strip() or None,
                 "observations": record_observations.strip() or None,
             }
-            ok, result = _create_vaccination_record(payload)
-            if ok and isinstance(result, dict):
-                _record_audit(
-                    "Registrar vacuna",
-                    "vaccination_record",
-                    str(result.get("id", "")),
-                    {"citizen_id": citizen_id, "vaccine_name": vaccine_name, "dose_number": dose_number.strip()},
+            if _is_duplicate_vaccination(payload, records):
+                st.error(
+                    "Ya existe una aplicación con la misma vacuna, dosis, fecha y lote. "
+                    "No se guardó un registro duplicado."
                 )
-                st.success("Vacuna registrada correctamente.")
-                st.rerun()
             else:
-                st.error(str(result))
+                ok, result = _create_vaccination_record(payload)
+                if ok and isinstance(result, dict):
+                    _record_audit(
+                        "Registrar vacuna",
+                        "vaccination_record",
+                        str(result.get("id", "")),
+                        {"citizen_id": citizen_id, "vaccine_name": vaccine_name, "dose_number": dose_number.strip()},
+                    )
+                    st.success("Vacuna registrada correctamente.")
+                    st.rerun()
+                else:
+                    st.error(str(result))
 
     st.markdown("### 3. Historial de vacunación")
-    history_ok, records, history_error = _load_vaccination_records(citizen_id)
     if not history_ok:
         st.error(history_error)
     elif not records:
