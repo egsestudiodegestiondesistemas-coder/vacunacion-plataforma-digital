@@ -7,6 +7,8 @@ from urllib.parse import quote_plus
 import hashlib
 import math
 import re
+import secrets
+import string
 
 import folium
 import pandas as pd
@@ -66,6 +68,8 @@ if "institutional_user" not in st.session_state:
     st.session_state.institutional_user = None
 if "access_requests" not in st.session_state:
     st.session_state.access_requests = []
+if "created_user_credentials" not in st.session_state:
+    st.session_state.created_user_credentials = None
 
 
 OFFICIAL_SOURCES = [
@@ -4127,29 +4131,180 @@ def _record_audit(action: str, entity_type: str, entity_id: str, details: dict |
     return (True, "Auditoría registrada.") if ok else (False, str(result))
 
 
-def _create_institutional_user(request_data: dict) -> tuple[bool, str]:
-    email = str(request_data.get("correo", "")).strip().lower()
-    if not email:
-        return False, "La solicitud no contiene un correo válido."
+def _generate_temporary_password(length: int = 14) -> str:
+    """Genera una clave temporal robusta para el primer ingreso."""
+    alphabet = string.ascii_letters + string.digits + "!@#$%*-_"
+    while True:
+        password = "".join(secrets.choice(alphabet) for _ in range(length))
+        if (
+            any(char.islower() for char in password)
+            and any(char.isupper() for char in password)
+            and any(char.isdigit() for char in password)
+            and any(char in "!@#$%*-_" for char in password)
+        ):
+            return password
 
+
+def _create_auth_user(email: str, password: str, metadata: dict) -> tuple[bool, object]:
+    url, key = _supabase_admin_config()
+    if not url or not key:
+        return False, "Falta SUPABASE_SECRET_KEY en Streamlit Secrets."
+
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
     payload = {
         "email": email,
-        "full_name": str(request_data.get("nombre", "")).strip(),
-        "role": str(request_data.get("perfil", "Profesional")).strip(),
-        "institution": str(request_data.get("institucion", "")).strip(),
+        "password": password,
+        "email_confirm": True,
+        "user_metadata": metadata,
+    }
+
+    try:
+        response = requests.post(
+            f"{url}/auth/v1/admin/users",
+            headers=headers,
+            json=payload,
+            timeout=20,
+        )
+        response.raise_for_status()
+        return True, response.json()
+    except requests.RequestException as exc:
+        detail = ""
+        if getattr(exc, "response", None) is not None:
+            detail = exc.response.text[:900]
+        return False, detail or str(exc)
+
+
+def _delete_auth_user(user_id: str) -> None:
+    """Revierte el alta en Auth si falla el perfil institucional."""
+    if not user_id:
+        return
+    url, key = _supabase_admin_config()
+    if not url or not key:
+        return
+    try:
+        requests.delete(
+            f"{url}/auth/v1/admin/users/{user_id}",
+            headers={
+                "apikey": key,
+                "Authorization": f"Bearer {key}",
+            },
+            timeout=20,
+        )
+    except requests.RequestException:
+        pass
+
+
+def _create_institutional_user(request_data: dict) -> tuple[bool, dict | str]:
+    email = str(request_data.get("correo", "")).strip().lower()
+    if not email or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        return False, "La solicitud no contiene un correo válido."
+
+    temporary_password = _generate_temporary_password()
+    full_name = str(request_data.get("nombre", "")).strip()
+    role = str(request_data.get("perfil", "Profesional")).strip()
+    institution = str(request_data.get("institucion", "")).strip()
+
+    auth_ok, auth_result = _create_auth_user(
+        email,
+        temporary_password,
+        {
+            "full_name": full_name,
+            "role": role,
+            "institution": institution,
+        },
+    )
+    if not auth_ok:
+        return False, (
+            "No se pudo crear la cuenta de acceso en Supabase Auth. "
+            f"Detalle: {auth_result}"
+        )
+
+    auth_user_id = ""
+    if isinstance(auth_result, dict):
+        auth_user_id = str(auth_result.get("id", ""))
+
+    profile_payload = {
+        "email": email,
+        "full_name": full_name,
+        "role": role,
+        "institution": institution,
         "request_id": str(request_data.get("id", "")) or None,
         "status": "Activo",
     }
 
-    ok, result = _supabase_rest(
+    profile_ok, profile_result = _supabase_rest(
         "POST",
         table=SUPABASE_USERS_TABLE,
         params={"on_conflict": "email"},
-        payload=payload,
+        payload=profile_payload,
         admin=True,
     )
-    return (True, "Usuario institucional creado.") if ok else (False, str(result))
+    if not profile_ok:
+        _delete_auth_user(auth_user_id)
+        return False, (
+            "La cuenta de acceso se creó, pero no pudo guardarse el perfil institucional. "
+            "El alta fue revertida. "
+            f"Detalle: {profile_result}"
+        )
 
+    return True, {
+        "email": email,
+        "temporary_password": temporary_password,
+        "role": role,
+        "institution": institution,
+        "auth_user_id": auth_user_id,
+    }
+
+
+def _authenticate_institutional_user(email: str, password: str) -> tuple[bool, dict | str]:
+    """Valida correo y contraseña en Supabase Auth."""
+    url, anon_key = _supabase_config()
+    if not url or not anon_key:
+        return False, "Supabase no está configurado."
+
+    try:
+        response = requests.post(
+            f"{url}/auth/v1/token",
+            params={"grant_type": "password"},
+            headers={
+                "apikey": anon_key,
+                "Content-Type": "application/json",
+            },
+            json={
+                "email": email.strip().lower(),
+                "password": password,
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+    except requests.RequestException:
+        return False, "Correo o clave incorrectos."
+
+    profile_ok, profile_result = _supabase_rest(
+        "GET",
+        table=SUPABASE_USERS_TABLE,
+        params={
+            "select": "email,full_name,role,institution,status",
+            "email": f"eq.{email.strip().lower()}",
+            "limit": "1",
+        },
+        admin=True,
+    )
+    if not profile_ok:
+        return False, "La cuenta existe, pero no se pudo consultar su perfil institucional."
+
+    if not isinstance(profile_result, list) or not profile_result:
+        return False, "La cuenta no tiene un perfil institucional habilitado."
+
+    profile = profile_result[0]
+    if str(profile.get("status", "")).strip().lower() != "activo":
+        return False, "La cuenta institucional no está activa."
+
+    return True, profile
 
 def _load_audit_log(limit: int = 100) -> tuple[bool, list]:
     ok, result = _supabase_rest(
@@ -4468,26 +4623,38 @@ def render_professional_portal() -> None:
             login = st.form_submit_button("Ingresar", use_container_width=True)
 
         if login:
-            users = _institutional_users()
-            user = users.get(email.strip().lower())
-            valid_user = user and str(user.get("access_code", "")) == access_code
+            normalized_email = email.strip().lower()
             valid_admin = bool(_admin_code()) and access_code == _admin_code()
-            if valid_user:
+
+            if valid_admin:
                 st.session_state.institutional_authenticated = True
-                st.session_state.institutional_user = email.strip().lower()
-                st.session_state.institutional_role = str(user.get("role", "Referente institucional"))
-                st.session_state.professional_access_view = "Espacio institucional"
-                st.rerun()
-            elif valid_admin:
-                st.session_state.institutional_authenticated = True
-                st.session_state.institutional_user = email.strip().lower() or "Administración"
+                st.session_state.institutional_user = normalized_email or "Administración"
                 st.session_state.institutional_role = "Superadministradora"
                 st.session_state.professional_access_view = "Espacio institucional"
                 st.rerun()
+            elif not normalized_email or not access_code:
+                st.error("Ingresá el correo y la clave de acceso.")
             else:
-                st.error("Las credenciales no son válidas o la cuenta todavía no fue autorizada.")
+                auth_ok, auth_result = _authenticate_institutional_user(
+                    normalized_email,
+                    access_code,
+                )
+                if auth_ok and isinstance(auth_result, dict):
+                    st.session_state.institutional_authenticated = True
+                    st.session_state.institutional_user = normalized_email
+                    st.session_state.institutional_role = str(
+                        auth_result.get("role", "Referente institucional")
+                    )
+                    st.session_state.professional_access_view = "Espacio institucional"
+                    st.rerun()
+                else:
+                    st.error(str(auth_result))
 
-        st.caption("Las credenciales deben configurarse en .streamlit/secrets.toml. No se incluyen contraseñas dentro del código.")
+        st.caption(
+            "Las cuentas aprobadas ingresan con el correo registrado y la clave temporal "
+            "generada por la administración. La clave de Superadministradora permanece "
+            "configurada en Streamlit Secrets."
+        )
         if st.button("Volver a la bienvenida", use_container_width=True, key="login_back"):
             st.session_state.professional_access_view = "Bienvenida"
             st.rerun()
@@ -4695,28 +4862,68 @@ def render_professional_portal() -> None:
                     )
 
                 if approve:
-                    user_ok, user_message = _create_institutional_user(request)
-                    if not user_ok:
-                        st.error(user_message)
+                    if current_status == "Aprobada":
+                        st.warning("Esta solicitud ya figura como aprobada.")
                     else:
-                        update_ok, update_message = _update_access_request(
-                            request_id, "Aprobada", review_note
-                        )
-                        if update_ok:
-                            _record_audit(
-                                "Aprobar solicitud",
-                                "access_request",
-                                request_id,
-                                {
-                                    "estado_anterior": current_status,
-                                    "estado_nuevo": "Aprobada",
-                                    "correo": request.get("correo", ""),
-                                },
+                        user_ok, user_result = _create_institutional_user(request)
+                        if not user_ok:
+                            st.error(str(user_result))
+                        elif isinstance(user_result, dict):
+                            update_ok, update_message = _update_access_request(
+                                request_id, "Aprobada", review_note
                             )
-                            st.success("Solicitud aprobada y usuario institucional creado.")
-                            st.rerun()
-                        else:
-                            st.error(update_message)
+                            if update_ok:
+                                st.session_state.created_user_credentials = user_result
+                                _record_audit(
+                                    "Aprobar solicitud y crear usuario",
+                                    "access_request",
+                                    request_id,
+                                    {
+                                        "estado_anterior": current_status,
+                                        "estado_nuevo": "Aprobada",
+                                        "correo": request.get("correo", ""),
+                                        "auth_user_id": user_result.get("auth_user_id", ""),
+                                    },
+                                )
+                                st.success(
+                                    "Solicitud aprobada y cuenta institucional creada."
+                                )
+                            else:
+                                st.error(update_message)
+
+                created_credentials = st.session_state.get("created_user_credentials")
+                if (
+                    isinstance(created_credentials, dict)
+                    and created_credentials.get("email") == str(request.get("correo", "")).strip().lower()
+                ):
+                    st.markdown("### Credenciales iniciales")
+                    st.warning(
+                        "Copiá estos datos antes de salir de esta solicitud. "
+                        "La clave temporal se muestra únicamente durante esta sesión administrativa."
+                    )
+                    st.text_input(
+                        "Correo de acceso",
+                        value=str(created_credentials.get("email", "")),
+                        disabled=True,
+                        key=f"created_email_{request_id}",
+                    )
+                    st.text_input(
+                        "Clave temporal",
+                        value=str(created_credentials.get("temporary_password", "")),
+                        disabled=True,
+                        key=f"created_password_{request_id}",
+                    )
+                    st.caption(
+                        "Entregá estas credenciales por un canal seguro. "
+                        "La persona podrá ingresar desde “Ya tengo una cuenta”."
+                    )
+                    if st.button(
+                        "Ocultar credenciales",
+                        use_container_width=True,
+                        key=f"hide_created_credentials_{request_id}",
+                    ):
+                        st.session_state.created_user_credentials = None
+                        st.rerun()
 
                 if request_more:
                     update_ok, update_message = _update_access_request(
