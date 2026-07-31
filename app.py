@@ -4535,104 +4535,185 @@ def _record_matches_vaccine(record_name: object, aliases: list[str]) -> bool:
 
 
 def _calendar_rules_for_age(age: dict) -> list[dict]:
-    """Devuelve hitos documentales del Calendario Nacional 2026 aplicables por edad.
+    """Hitos documentales del Calendario Nacional 2026 aplicables por edad.
 
-    La salida no prescribe una conducta clínica: marca hitos cuya documentación debe
-    verificarse contra el carnet, antecedentes y lineamientos vigentes.
+    Los umbrales temporales se utilizan para control de coherencia documental. No
+    reemplazan la validación clínica ni determinan por sí solos la validez de una dosis.
     """
     months = age["months"]
     years = age["years"]
     rules: list[dict] = []
 
-    def add(vaccine: str, milestone: str, explanation: str, aliases: list[str] | None = None, review_only: bool = False):
+    def add(
+        vaccine: str,
+        milestone: str,
+        explanation: str,
+        aliases: list[str] | None = None,
+        *,
+        sequence: int | None = None,
+        target_days: int | None = None,
+        maximum_days: int | None = None,
+        review_only: bool = False,
+    ) -> None:
         rules.append({
             "vaccine": vaccine,
             "milestone": milestone,
             "explanation": explanation,
             "aliases": aliases or [vaccine],
+            "sequence": sequence,
+            "target_days": target_days,
+            "maximum_days": maximum_days,
             "review_only": review_only,
         })
 
-    if months >= 0:
-        add("Hepatitis B", "Nacimiento", "Dosis neonatal dentro de las primeras 12 horas de vida.")
-        add("BCG", "Nacimiento", "Dosis antes del egreso de la maternidad.")
+    add("Hepatitis B", "Nacimiento", "Dosis neonatal dentro de las primeras 12 horas de vida.", sequence=1, target_days=0)
+    add("BCG", "Nacimiento", "Dosis antes del egreso de la maternidad.", sequence=1, target_days=0)
+
     if months >= 2:
-        add("Neumococo", "2 meses", "Primera dosis del esquema infantil.")
-        add("Polio", "2 meses", "Primera dosis del esquema infantil.", ["Polio", "IPV", "Salk"])
-        add("Quíntuple", "2 meses", "Primera dosis del esquema infantil.", ["Quíntuple", "Pentavalente"])
-        add("Rotavirus", "2 meses", "Primera dosis dentro de la edad máxima permitida.")
+        add("Neumococo", "2 meses", "Primera dosis del esquema infantil.", sequence=1, target_days=60)
+        add("Polio", "2 meses", "Primera dosis del esquema infantil.", ["Polio", "IPV", "Salk"], sequence=1, target_days=60)
+        add("Quíntuple", "2 meses", "Primera dosis del esquema infantil.", ["Quíntuple", "Pentavalente"], sequence=1, target_days=60)
+        add("Rotavirus", "2 meses", "Primera dosis; edad máxima oficial: 14 semanas y 6 días.", sequence=1, target_days=60, maximum_days=104)
     if months >= 3:
-        add("Meningococo", "3 meses", "Primera dosis del esquema infantil.")
+        add("Meningococo", "3 meses", "Primera dosis del esquema infantil.", sequence=1, target_days=90)
     if months >= 4:
-        add("Neumococo", "4 meses", "Segunda dosis del esquema infantil.")
-        add("Polio", "4 meses", "Segunda dosis del esquema infantil.", ["Polio", "IPV", "Salk"])
-        add("Quíntuple", "4 meses", "Segunda dosis del esquema infantil.", ["Quíntuple", "Pentavalente"])
-        add("Rotavirus", "4 meses", "Segunda dosis dentro de la edad máxima permitida.")
+        add("Neumococo", "4 meses", "Segunda dosis del esquema infantil.", sequence=2, target_days=120)
+        add("Polio", "4 meses", "Segunda dosis del esquema infantil.", ["Polio", "IPV", "Salk"], sequence=2, target_days=120)
+        add("Quíntuple", "4 meses", "Segunda dosis del esquema infantil.", ["Quíntuple", "Pentavalente"], sequence=2, target_days=120)
+        add("Rotavirus", "4 meses", "Segunda dosis; edad máxima oficial para la última dosis: 24 semanas.", sequence=2, target_days=120, maximum_days=168)
     if months >= 5:
-        add("Meningococo", "5 meses", "Segunda dosis del esquema infantil.")
+        add("Meningococo", "5 meses", "Segunda dosis del esquema infantil.", sequence=2, target_days=150)
     if months >= 6:
-        add("Polio", "6 meses", "Tercera dosis del esquema infantil.", ["Polio", "IPV", "Salk"])
-        add("Quíntuple", "6 meses", "Tercera dosis del esquema infantil.", ["Quíntuple", "Pentavalente"])
+        add("Polio", "6 meses", "Tercera dosis del esquema infantil.", ["Polio", "IPV", "Salk"], sequence=3, target_days=180)
+        add("Quíntuple", "6 meses", "Tercera dosis del esquema infantil.", ["Quíntuple", "Pentavalente"], sequence=3, target_days=180)
         if months < 24:
-            add("Antigripal", "6 a 24 meses", "Vacunación anual; la cantidad inicial de dosis depende de antecedentes.", review_only=True)
+            add("Antigripal", "6 a 24 meses", "Vacunación anual; la cantidad inicial depende de antecedentes.", review_only=True)
     if months >= 12:
-        add("Neumococo", "12 meses", "Refuerzo del esquema infantil.")
-        add("Hepatitis A", "12 meses", "Una dosis del Calendario Nacional.")
-        add("Triple viral", "12 meses", "Primera dosis.", ["Triple viral", "SRP"])
+        add("Neumococo", "12 meses", "Refuerzo del esquema infantil.", sequence=3, target_days=365)
+        add("Hepatitis A", "12 meses", "Una dosis del Calendario Nacional.", sequence=1, target_days=365)
+        add("Triple viral", "12 meses", "Primera dosis.", ["Triple viral", "SRP"], sequence=1, target_days=365)
     if months >= 15:
-        add("Meningococo", "15 meses", "Dosis de refuerzo.")
-        add("Varicela", "15 meses", "Primera dosis.")
-        add("Triple viral", "15 a 18 meses", "Segunda dosis según el calendario 2026.", ["Triple viral", "SRP"])
-        add("Quíntuple", "15 a 18 meses", "Refuerzo del esquema infantil.", ["Quíntuple", "Pentavalente"])
+        add("Meningococo", "15 meses", "Dosis de refuerzo.", sequence=3, target_days=456)
+        add("Varicela", "15 meses", "Primera dosis.", sequence=1, target_days=456)
+        add("Triple viral", "15 a 18 meses", "Segunda dosis según el calendario 2026.", ["Triple viral", "SRP"], sequence=2, target_days=456)
+        add("Quíntuple", "15 a 18 meses", "Refuerzo del esquema infantil.", ["Quíntuple", "Pentavalente"], sequence=4, target_days=456)
     if years >= 5:
-        add("Polio", "5 años", "Refuerzo correspondiente al ingreso escolar.", ["Polio", "IPV", "Salk"])
-        add("Triple bacteriana celular", "5 años", "Refuerzo correspondiente al ingreso escolar.", ["Triple bacteriana celular", "DPT"])
-        add("Triple viral", "5 años", "Revisar cohorte y esquema previo; algunas cohortes continúan con vacunación a esta edad.", ["Triple viral", "SRP"], review_only=True)
-        add("Varicela", "5 años", "Revisar y completar el esquema según cohorte y antecedentes.", review_only=True)
+        add("Polio", "5 años", "Refuerzo correspondiente al ingreso escolar.", ["Polio", "IPV", "Salk"], sequence=4, target_days=1826)
+        add("Triple bacteriana celular", "5 años", "Refuerzo correspondiente al ingreso escolar.", ["Triple bacteriana celular", "DPT"], sequence=1, target_days=1826)
+        add("Triple viral", "5 años", "Revisar cohorte y esquema previo.", ["Triple viral", "SRP"], review_only=True)
+        add("Varicela", "5 años", "Revisar y completar según cohorte y antecedentes.", review_only=True)
     if years >= 11:
-        add("VPH", "11 años", "Una única dosis según el Calendario Nacional.", ["VPH", "HPV"])
-        add("Meningococo", "11 años", "Una única dosis.")
-        add("Triple bacteriana acelular", "11 años", "Una única dosis.", ["Triple bacteriana acelular", "dTpa"])
+        add("VPH", "11 años", "Una única dosis según el Calendario Nacional.", ["VPH", "HPV"], sequence=1, target_days=4018)
+        add("Meningococo", "11 años", "Una única dosis.", sequence=4, target_days=4018)
+        add("Triple bacteriana acelular", "11 años", "Una única dosis.", ["Triple bacteriana acelular", "dTpa"], sequence=1, target_days=4018)
     if 15 <= years < 65:
         add("Doble bacteriana", "15 a 64 años", "Revisar esquema básico y refuerzo cada 10 años.", ["Doble bacteriana", "dT"], review_only=True)
         add("Doble o triple viral", "15 a 64 años", "Verificar dos dosis posteriores al año de vida según cohorte y antecedentes.", ["Triple viral", "Doble viral", "SRP", "SR"], review_only=True)
         add("Antigripal", "15 a 64 años", "Corresponde anualmente en grupos con indicación específica.", review_only=True)
         add("Fiebre Hemorrágica Argentina", "Desde 15 años", "Revisar indicación por residencia o trabajo en zona endémica.", ["Fiebre Hemorrágica Argentina", "Candid 1"], review_only=True)
     if years >= 65:
-        add("Antigripal", "65 años o más", "Una dosis anual.")
+        add("Antigripal", "65 años o más", "Una dosis anual.", review_only=True)
         add("Neumococo", "65 años o más", "Revisar esquema vigente y antecedentes.", review_only=True)
         add("Doble bacteriana", "65 años o más", "Completar esquema y refuerzo cada 10 años.", ["Doble bacteriana", "dT"], review_only=True)
 
     return rules
 
 
+def _sorted_matching_records(records: list, aliases: list[str]) -> list[dict]:
+    matches = [
+        record for record in records
+        if _record_matches_vaccine(record.get("vaccine_name"), aliases)
+    ]
+    return sorted(
+        matches,
+        key=lambda record: _parse_iso_date(record.get("application_date")) or datetime.max.date(),
+    )
+
+
+def _assess_record_timing(birth_date, record: dict, rule: dict, previous_record: dict | None) -> tuple[str, str]:
+    application_date = _parse_iso_date(record.get("application_date"))
+    if not application_date:
+        return "Revisar", "La aplicación encontrada no tiene una fecha válida."
+
+    age_days = (application_date - birth_date).days
+    if age_days < 0:
+        return "Revisar", "La fecha registrada es anterior al nacimiento."
+
+    maximum_days = rule.get("maximum_days")
+    if maximum_days is not None and age_days > maximum_days:
+        return "Revisar", f"Aplicación registrada a los {age_days} días, fuera de la edad máxima documental de {maximum_days} días."
+
+    target_days = rule.get("target_days")
+    if target_days is not None and age_days < max(target_days - 7, 0):
+        return "Revisar", f"Aplicación registrada a los {age_days} días; ocurrió antes del hito esperado y requiere validación profesional."
+
+    if previous_record:
+        previous_date = _parse_iso_date(previous_record.get("application_date"))
+        if previous_date:
+            interval_days = (application_date - previous_date).days
+            if interval_days < 0:
+                return "Revisar", "El orden cronológico de las dosis no es consistente."
+            if interval_days < 28:
+                return "Revisar", f"Intervalo documental de {interval_days} días con la dosis anterior; verificar el intervalo mínimo específico."
+            return "Registrada", f"Aplicación compatible encontrada. Intervalo documental con la dosis anterior: {interval_days} días."
+
+    return "Registrada", f"Aplicación compatible encontrada a los {age_days} días de vida."
+
+
 def _calendar_assessment(birth_date, records: list) -> tuple[dict, list[dict]]:
     age = _age_detail(birth_date)
-    results = []
+    results: list[dict] = []
+
     for rule in _calendar_rules_for_age(age):
-        matches = [
-            record for record in records
-            if _record_matches_vaccine(record.get("vaccine_name"), rule["aliases"])
-        ]
-        if matches:
-            status = "Registrada"
-            detail = f"{len(matches)} aplicación/es encontrada/s en esta plataforma."
+        matches = _sorted_matching_records(records, rule["aliases"])
+        selected_record = None
+        previous_record = None
+        sequence = rule.get("sequence")
+
+        if sequence is not None and len(matches) >= sequence:
+            selected_record = matches[sequence - 1]
+            if sequence > 1:
+                previous_record = matches[sequence - 2]
+        elif sequence is None and matches:
+            selected_record = matches[-1]
+
+        if selected_record:
+            status, validation = _assess_record_timing(
+                birth_date,
+                selected_record,
+                rule,
+                previous_record,
+            )
+            detail = f"{len(matches)} aplicación/es compatible/s encontrada/s en esta plataforma."
+            application_date = str(selected_record.get("application_date") or "")
         elif rule["review_only"]:
             status = "Revisar"
-            detail = "La indicación depende de antecedentes, cohorte, riesgo o intervalos."
+            detail = "La indicación depende de antecedentes, cohorte, riesgo, periodicidad o intervalos."
+            validation = "Requiere verificación con carnet, sistemas oficiales y lineamiento vigente."
+            application_date = ""
         else:
             status = "Sin registro"
-            detail = "No se encontró una aplicación compatible en esta plataforma."
-        results.append({**rule, "status": status, "detail": detail})
+            detail = "No se encontró una aplicación que cubra este hito en la plataforma."
+            validation = "No confirma una dosis pendiente; puede existir documentación externa."
+            application_date = ""
+
+        results.append({
+            **rule,
+            "status": status,
+            "detail": detail,
+            "validation": validation,
+            "application_date": application_date,
+        })
+
     return age, results
 
 
 def render_intelligent_calendar(citizen: dict, records: list) -> None:
     birth_date = _parse_iso_date(citizen.get("birth_date"))
-    st.markdown("### Calendario Nacional Inteligente")
+    st.markdown("### Motor Inteligente de Validación v2")
     st.caption(
-        "Comparación documental con el Calendario Nacional 2026. No reemplaza el carnet, "
-        "la evaluación clínica, la validación de intervalos ni los sistemas oficiales."
+        "Control documental por edad, secuencia, cronología, intervalos y ventanas máximas conocidas. "
+        "No reemplaza el carnet, NOMIVAC/SISA, la evaluación clínica ni la normativa vigente."
     )
 
     if not birth_date:
@@ -4646,15 +4727,15 @@ def render_intelligent_calendar(citizen: dict, records: list) -> None:
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Edad", age["label"])
-    m2.metric("Registradas", registered)
+    m2.metric("Compatibles", registered)
     m3.metric("Sin registro", missing)
     m4.metric("Revisar", review)
 
     st.markdown(
         '<div class="decision-panel"><strong>Interpretación profesional</strong>'
-        '<p>“Sin registro” significa únicamente que no existe una coincidencia en esta base. '
-        'No confirma que la dosis esté pendiente. Antes de actuar, verificá carnet, NOMIVAC/SISA, '
-        'antecedentes, cohorte, intervalos mínimos, condiciones clínicas y lineamientos vigentes.</p></div>',
+        '<p>El motor asigna aplicaciones por orden cronológico a cada hito y genera alertas conservadoras. '
+        '“Registrada” significa coincidencia documental compatible; no certifica validez clínica. '
+        '“Sin registro” indica ausencia en esta base y “Revisar” señala que se necesita validación humana.</p></div>',
         unsafe_allow_html=True,
     )
 
@@ -4671,8 +4752,9 @@ def render_intelligent_calendar(citizen: dict, records: list) -> None:
             "Estado": item["status"],
             "Vacuna": item["vaccine"],
             "Hito": item["milestone"],
+            "Fecha encontrada": item["application_date"],
             "Fundamento": item["explanation"],
-            "Lectura del sistema": item["detail"],
+            "Validación automática": item["validation"],
         }
         for item in visible
     ]
@@ -4681,11 +4763,23 @@ def render_intelligent_calendar(citizen: dict, records: list) -> None:
     else:
         st.info("No hay resultados para los estados seleccionados.")
 
-    with st.expander("Criterios y límites del análisis", expanded=False):
+    alerts = [item for item in assessment if item["status"] == "Revisar" and item["application_date"]]
+    if alerts:
+        st.warning(
+            f"Se detectaron {len(alerts)} aplicación/es registrada/s que requieren revisión "
+            "de edad, secuencia o intervalo antes de considerarlas válidas."
+        )
+
+    with st.expander("Criterios, controles y límites", expanded=False):
         st.write(
-            "El motor identifica coincidencias por denominación de vacuna y edad cronológica. "
-            "No determina validez de dosis, intervalos, recuperación de esquemas, indicaciones por "
-            "embarazo, inmunocompromiso, exposición, viaje, ocupación, residencia o factores de riesgo."
+            "La versión 2 ordena las aplicaciones por fecha, asigna cada una a un hito, controla "
+            "fechas anteriores al nacimiento, secuencias, intervalos documentales menores de 28 días "
+            "y las edades máximas oficiales de Rotavirus. Los 28 días funcionan como alerta conservadora: "
+            "el intervalo mínimo definitivo depende de la vacuna, la dosis, la edad y el lineamiento aplicable."
+        )
+        st.write(
+            "No evalúa embarazo, inmunocompromiso, exposición, viaje, ocupación, residencia, factores "
+            "de riesgo, esquemas heterólogos ni excepciones clínicas."
         )
         st.link_button(
             "Consultar Calendario Nacional 2026",
@@ -4693,6 +4787,13 @@ def render_intelligent_calendar(citizen: dict, records: list) -> None:
             use_container_width=True,
             key=f'intelligent_calendar_source_{citizen.get("id", "citizen")}',
         )
+        st.link_button(
+            "Consultar lineamientos y recupero de esquemas",
+            "https://www.argentina.gob.ar/salud/inmunoprevenibles/recomendaciones-manuales-y-lineamientos",
+            use_container_width=True,
+            key=f'intelligent_calendar_guidelines_{citizen.get("id", "citizen")}',
+        )
+
 
 def render_nominal_registry() -> None:
     heading(
