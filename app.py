@@ -35,6 +35,8 @@ MI_ARGENTINA_URL = "https://www.argentina.gob.ar/miargentina"
 SIGIPSA_URL = "https://www.sigipsa.com.ar/"
 NOMIVAC_URL = "https://sisa.msal.gov.ar/"
 SUPABASE_REQUESTS_TABLE = "access_requests"
+SUPABASE_USERS_TABLE = "institutional_users"
+SUPABASE_AUDIT_TABLE = "audit_log"
 
 if "section" not in st.session_state:
     st.session_state.section = "Inicio"
@@ -4040,10 +4042,18 @@ def render_sources() -> None:
 
 
 def _supabase_config() -> tuple[str, str]:
-    """Obtiene URL y clave publicable desde Streamlit Secrets."""
     try:
         url = str(st.secrets.get("SUPABASE_URL", "")).strip().rstrip("/")
         key = str(st.secrets.get("SUPABASE_ANON_KEY", "")).strip()
+        return url, key
+    except Exception:
+        return "", ""
+
+
+def _supabase_admin_config() -> tuple[str, str]:
+    try:
+        url = str(st.secrets.get("SUPABASE_URL", "")).strip().rstrip("/")
+        key = str(st.secrets.get("SUPABASE_SECRET_KEY", "")).strip()
         return url, key
     except Exception:
         return "", ""
@@ -4054,19 +4064,28 @@ def _supabase_enabled() -> bool:
     return bool(url and key)
 
 
+def _supabase_admin_enabled() -> bool:
+    url, key = _supabase_admin_config()
+    return bool(url and key)
+
+
 def _supabase_rest(
     method: str,
     *,
+    table: str = SUPABASE_REQUESTS_TABLE,
     params: dict | None = None,
     payload: dict | None = None,
+    admin: bool = False,
 ) -> tuple[bool, object]:
-    """Opera sobre access_requests mediante la API REST de Supabase."""
-    url, key = _supabase_config()
+    url, key = _supabase_admin_config() if admin else _supabase_config()
+
     if not url or not key:
-        return False, "Faltan SUPABASE_URL o SUPABASE_ANON_KEY en Streamlit Secrets."
+        missing = "SUPABASE_SECRET_KEY" if admin else "SUPABASE_URL o SUPABASE_ANON_KEY"
+        return False, f"Falta configurar {missing} en Streamlit Secrets."
 
     headers = {
         "apikey": key,
+        "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
         "Prefer": "return=representation",
     }
@@ -4074,11 +4093,11 @@ def _supabase_rest(
     try:
         response = requests.request(
             method,
-            f"{url}/rest/v1/{SUPABASE_REQUESTS_TABLE}",
+            f"{url}/rest/v1/{table}",
             headers=headers,
             params=params,
             json=payload,
-            timeout=15,
+            timeout=20,
         )
         response.raise_for_status()
         if not response.text:
@@ -4087,8 +4106,61 @@ def _supabase_rest(
     except requests.RequestException as exc:
         detail = ""
         if getattr(exc, "response", None) is not None:
-            detail = exc.response.text[:700]
+            detail = exc.response.text[:900]
         return False, detail or str(exc)
+
+
+def _record_audit(action: str, entity_type: str, entity_id: str, details: dict | None = None) -> tuple[bool, str]:
+    payload = {
+        "actor": str(st.session_state.get("institutional_user") or "Administración"),
+        "action": action,
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "details": details or {},
+    }
+    ok, result = _supabase_rest(
+        "POST",
+        table=SUPABASE_AUDIT_TABLE,
+        payload=payload,
+        admin=True,
+    )
+    return (True, "Auditoría registrada.") if ok else (False, str(result))
+
+
+def _create_institutional_user(request_data: dict) -> tuple[bool, str]:
+    email = str(request_data.get("correo", "")).strip().lower()
+    if not email:
+        return False, "La solicitud no contiene un correo válido."
+
+    payload = {
+        "email": email,
+        "full_name": str(request_data.get("nombre", "")).strip(),
+        "role": str(request_data.get("perfil", "Profesional")).strip(),
+        "institution": str(request_data.get("institucion", "")).strip(),
+        "request_id": str(request_data.get("id", "")) or None,
+        "status": "Activo",
+    }
+
+    ok, result = _supabase_rest(
+        "POST",
+        table=SUPABASE_USERS_TABLE,
+        params={"on_conflict": "email"},
+        payload=payload,
+        admin=True,
+    )
+    return (True, "Usuario institucional creado.") if ok else (False, str(result))
+
+
+def _load_audit_log(limit: int = 100) -> tuple[bool, list]:
+    ok, result = _supabase_rest(
+        "GET",
+        table=SUPABASE_AUDIT_TABLE,
+        params={"select": "*", "order": "created_at.desc", "limit": str(limit)},
+        admin=True,
+    )
+    if not ok:
+        return False, []
+    return True, result if isinstance(result, list) else []
 
 
 def _tracking_code(email: str) -> str:
@@ -4112,6 +4184,7 @@ def _load_access_requests() -> tuple[bool, list]:
             "order": "created_at.desc",
             "limit": "500",
         },
+        admin=True,
     )
     if not ok:
         return False, []
@@ -4131,6 +4204,7 @@ def _update_access_request(
             "nota_revision": review_note.strip(),
             "reviewed_at": datetime.now(timezone.utc).isoformat(),
         },
+        admin=True,
     )
     if ok:
         return True, "Estado actualizado."
@@ -4471,84 +4545,231 @@ def render_professional_portal() -> None:
 
         if st.session_state.institutional_role == "Superadministradora":
             st.divider()
-            heading("Administración", "Solicitudes de acceso")
+            heading(
+                "Administración",
+                "Gestión de solicitudes",
+                "Revisión, decisión, trazabilidad y alta institucional.",
+            )
+
+            if not _supabase_admin_enabled():
+                st.error(
+                    "Falta SUPABASE_SECRET_KEY en Streamlit Secrets. "
+                    "El panel administrativo requiere una clave privada del servidor."
+                )
+                return
 
             ok, requests_list = _load_access_requests()
+
             if not ok:
                 st.error("No fue posible cargar las solicitudes desde Supabase.")
-            elif not requests_list:
-                st.info("No hay solicitudes registradas.")
+                return
+
+            counts = {
+                "Total": len(requests_list),
+                "Pendientes": sum(r.get("estado") == "Pendiente" for r in requests_list),
+                "Aprobadas": sum(r.get("estado") == "Aprobada" for r in requests_list),
+                "Información": sum(r.get("estado") == "Requiere información" for r in requests_list),
+                "Rechazadas": sum(r.get("estado") == "Rechazada" for r in requests_list),
+            }
+
+            metric_cols = st.columns(5)
+            for column, (label, value) in zip(metric_cols, counts.items()):
+                with column:
+                    st.metric(label, value)
+
+            f1, f2, f3 = st.columns([1.4, 1, 1])
+            with f1:
+                search_term = st.text_input(
+                    "Buscar",
+                    placeholder="Nombre, correo, institución, matrícula o código...",
+                    key="admin_request_search",
+                ).strip().lower()
+            with f2:
+                status_options = sorted({str(r.get("estado", "Pendiente")) for r in requests_list})
+                selected_status = st.selectbox(
+                    "Estado",
+                    ["Todos"] + status_options,
+                    key="admin_request_status",
+                )
+            with f3:
+                type_options = sorted({str(r.get("request_type", "No informado")) for r in requests_list})
+                selected_type = st.selectbox(
+                    "Tipo",
+                    ["Todos"] + type_options,
+                    key="admin_request_type",
+                )
+
+            filtered = []
+            for request in requests_list:
+                searchable = " ".join(
+                    [
+                        str(request.get("nombre", "")),
+                        str(request.get("correo", "")),
+                        str(request.get("institucion", "")),
+                        str(request.get("matricula", "")),
+                        str(request.get("codigo_seguimiento", "")),
+                        str(request.get("perfil", "")),
+                    ]
+                ).lower()
+                if (
+                    (not search_term or search_term in searchable)
+                    and (selected_status == "Todos" or request.get("estado") == selected_status)
+                    and (selected_type == "Todos" or request.get("request_type") == selected_type)
+                ):
+                    filtered.append(request)
+
+            st.caption(f"{len(filtered)} solicitudes visibles.")
+
+            if not filtered:
+                st.info("No hay solicitudes que coincidan con los filtros.")
             else:
-                for index, request in enumerate(requests_list):
-                    request_id = request.get("id")
-                    title = (
-                        f"{request.get('nombre', 'Sin nombre')} · "
-                        f"{request.get('institucion', 'Sin institución')} · "
-                        f"{request.get('estado', 'Pendiente')}"
+                rows = [
+                    {
+                        "Fecha": r.get("fecha") or r.get("created_at", ""),
+                        "Nombre": r.get("nombre", ""),
+                        "Tipo": r.get("request_type", ""),
+                        "Institución": r.get("institucion", ""),
+                        "Perfil": r.get("perfil", ""),
+                        "Estado": r.get("estado", "Pendiente"),
+                        "Código": r.get("codigo_seguimiento", ""),
+                    }
+                    for r in filtered
+                ]
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+                options = {
+                    f"{r.get('nombre', 'Sin nombre')} · {r.get('codigo_seguimiento', '')} · {r.get('estado', 'Pendiente')}": r
+                    for r in filtered
+                }
+                selected_label = st.selectbox(
+                    "Abrir solicitud",
+                    list(options.keys()),
+                    key="admin_request_selector",
+                )
+                request = options[selected_label]
+                request_id = str(request.get("id", ""))
+                current_status = str(request.get("estado", "Pendiente"))
+
+                st.markdown("### Detalle de la solicitud")
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.write(f"**Nombre:** {request.get('nombre', '')}")
+                    st.write(f"**Correo:** {request.get('correo', '')}")
+                    st.write(f"**Teléfono:** {request.get('telefono') or 'No informado'}")
+                    st.write(f"**Profesión o cargo:** {request.get('profesion', '')}")
+                    st.write(f"**Institución:** {request.get('institucion', '')}")
+                with c2:
+                    st.write(f"**Matrícula o identificación:** {request.get('matricula') or 'No informada'}")
+                    st.write(f"**Jurisdicción:** {request.get('jurisdiccion') or 'No informada'}")
+                    st.write(f"**Perfil solicitado:** {request.get('perfil', '')}")
+                    st.write(f"**Interés SIGIPSA:** {'Sí' if request.get('sigipsa_interest') else 'No'}")
+                    st.write(f"**Código:** {request.get('codigo_seguimiento', '')}")
+
+                st.write(f"**Motivo:** {request.get('motivo', '')}")
+                review_note = st.text_area(
+                    "Observación administrativa",
+                    value=str(request.get("nota_revision") or ""),
+                    key=f"admin_review_note_{request_id}",
+                    height=110,
+                )
+                st.info(f"Estado actual: {current_status}")
+
+                a, b, c = st.columns(3)
+                with a:
+                    approve = st.button(
+                        "Aprobar y crear usuario",
+                        use_container_width=True,
+                        key=f"admin_approve_{request_id}",
                     )
-                    with st.expander(title):
-                        st.write(
-                            f"Tipo: {request.get('request_type', 'No informado')}"
-                        )
-                        st.write(f"Correo: {request.get('correo', '')}")
-                        st.write(
-                            f"Teléfono: {request.get('telefono') or 'No informado'}"
-                        )
-                        st.write(
-                            f"Profesión o cargo: {request.get('profesion', '')}"
-                        )
-                        st.write(
-                            "Matrícula o identificación: "
-                            f"{request.get('matricula') or 'No informada'}"
-                        )
-                        st.write(
-                            f"Jurisdicción: "
-                            f"{request.get('jurisdiccion') or 'No informada'}"
-                        )
-                        st.write(
-                            f"Perfil solicitado: {request.get('perfil', '')}"
-                        )
-                        st.write(
-                            "Interés SIGIPSA: "
-                            + ("Sí" if request.get("sigipsa_interest") else "No")
-                        )
-                        st.write(f"Motivo: {request.get('motivo', '')}")
-                        st.write(
-                            f"Código: "
-                            f"{request.get('codigo_seguimiento', 'No disponible')}"
-                        )
+                with b:
+                    request_more = st.button(
+                        "Solicitar información",
+                        use_container_width=True,
+                        key=f"admin_more_info_{request_id}",
+                    )
+                with c:
+                    reject = st.button(
+                        "Rechazar",
+                        use_container_width=True,
+                        key=f"admin_reject_{request_id}",
+                    )
 
-                        review_note = st.text_area(
-                            "Observación administrativa",
-                            value=str(request.get("nota_revision") or ""),
-                            key=f"review_note_{index}_{request_id}",
-                            height=80,
+                if approve:
+                    user_ok, user_message = _create_institutional_user(request)
+                    if not user_ok:
+                        st.error(user_message)
+                    else:
+                        update_ok, update_message = _update_access_request(
+                            request_id, "Aprobada", review_note
                         )
+                        if update_ok:
+                            _record_audit(
+                                "Aprobar solicitud",
+                                "access_request",
+                                request_id,
+                                {
+                                    "estado_anterior": current_status,
+                                    "estado_nuevo": "Aprobada",
+                                    "correo": request.get("correo", ""),
+                                },
+                            )
+                            st.success("Solicitud aprobada y usuario institucional creado.")
+                            st.rerun()
+                        else:
+                            st.error(update_message)
 
-                        a, b, c = st.columns(3)
-                        actions = [
-                            (a, "Aprobar", "Aprobada"),
-                            (b, "Solicitar información", "Requiere información"),
-                            (c, "Rechazar", "Rechazada"),
-                        ]
+                if request_more:
+                    update_ok, update_message = _update_access_request(
+                        request_id, "Requiere información", review_note
+                    )
+                    if update_ok:
+                        _record_audit(
+                            "Solicitar información",
+                            "access_request",
+                            request_id,
+                            {"estado_anterior": current_status, "estado_nuevo": "Requiere información"},
+                        )
+                        st.success(update_message)
+                        st.rerun()
+                    else:
+                        st.error(update_message)
 
-                        for column, label, status in actions:
-                            with column:
-                                if st.button(
-                                    label,
-                                    key=f"request_{status}_{index}_{request_id}",
-                                    use_container_width=True,
-                                ):
-                                    update_ok, update_message = _update_access_request(
-                                        request_id,
-                                        status,
-                                        review_note,
-                                    )
-                                    if update_ok:
-                                        st.success(update_message)
-                                        st.rerun()
-                                    else:
-                                        st.error(update_message)
+                if reject:
+                    update_ok, update_message = _update_access_request(
+                        request_id, "Rechazada", review_note
+                    )
+                    if update_ok:
+                        _record_audit(
+                            "Rechazar solicitud",
+                            "access_request",
+                            request_id,
+                            {"estado_anterior": current_status, "estado_nuevo": "Rechazada"},
+                        )
+                        st.success(update_message)
+                        st.rerun()
+                    else:
+                        st.error(update_message)
+
+            st.markdown("### Auditoría reciente")
+            audit_ok, audit_rows = _load_audit_log(limit=50)
+            if not audit_ok:
+                st.warning("No fue posible cargar el registro de auditoría.")
+            elif not audit_rows:
+                st.info("Todavía no hay acciones administrativas registradas.")
+            else:
+                audit_df = pd.DataFrame(
+                    [
+                        {
+                            "Fecha": row.get("created_at", ""),
+                            "Actor": row.get("actor", ""),
+                            "Acción": row.get("action", ""),
+                            "Entidad": row.get("entity_type", ""),
+                            "Identificador": row.get("entity_id", ""),
+                        }
+                        for row in audit_rows
+                    ]
+                )
+                st.dataframe(audit_df, use_container_width=True, hide_index=True)
         return
 
     st.session_state.professional_access_view = "Bienvenida"
