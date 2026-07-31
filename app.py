@@ -30,7 +30,7 @@ APP_SUBTITLE = "Plataforma Oficial"
 APP_SLOGAN = "Información oficial para una vacunación en cada etapa de la vida."
 DEVELOPER = "EGS | Estudio de Gestión de Sistemas"
 AUTO_REFRESH_SECONDS = 21600
-LAST_CONTENT_REVIEW = "28/07/2026"
+LAST_CONTENT_REVIEW = "31/07/2026"
 
 CORDOBA_VACCINATION_URL = "https://vacunacion.cba.gov.ar/Vacunas"
 MI_ARGENTINA_URL = "https://www.argentina.gob.ar/miargentina"
@@ -4489,6 +4489,211 @@ def _is_duplicate_vaccination(payload: dict, records: list) -> bool:
     return False
 
 
+
+def _age_detail(birth_date) -> dict:
+    """Calcula edad cronológica en días, meses y años sin dependencias externas."""
+    today = datetime.now().date()
+    if not birth_date or birth_date > today:
+        return {"days": 0, "months": 0, "years": 0, "label": "Edad no disponible"}
+
+    days = (today - birth_date).days
+    months = (today.year - birth_date.year) * 12 + today.month - birth_date.month
+    if today.day < birth_date.day:
+        months -= 1
+    months = max(months, 0)
+    years = today.year - birth_date.year - (
+        (today.month, today.day) < (birth_date.month, birth_date.day)
+    )
+
+    if days < 60:
+        label = f"{days} días"
+    elif months < 24:
+        label = f"{months} meses"
+    else:
+        label = f"{years} años"
+    return {"days": days, "months": months, "years": years, "label": label}
+
+
+def _normalize_vaccine_name(value: object) -> str:
+    normalized = str(value or "").strip().casefold()
+    replacements = {
+        "á": "a", "é": "e", "í": "i", "ó": "o", "ú": "u", "ü": "u", "ñ": "n"
+    }
+    for source, target in replacements.items():
+        normalized = normalized.replace(source, target)
+    return re.sub(r"[^a-z0-9]+", " ", normalized).strip()
+
+
+def _record_matches_vaccine(record_name: object, aliases: list[str]) -> bool:
+    record_normalized = _normalize_vaccine_name(record_name)
+    return any(
+        _normalize_vaccine_name(alias) in record_normalized
+        or record_normalized in _normalize_vaccine_name(alias)
+        for alias in aliases
+        if alias
+    )
+
+
+def _calendar_rules_for_age(age: dict) -> list[dict]:
+    """Devuelve hitos documentales del Calendario Nacional 2026 aplicables por edad.
+
+    La salida no prescribe una conducta clínica: marca hitos cuya documentación debe
+    verificarse contra el carnet, antecedentes y lineamientos vigentes.
+    """
+    months = age["months"]
+    years = age["years"]
+    rules: list[dict] = []
+
+    def add(vaccine: str, milestone: str, explanation: str, aliases: list[str] | None = None, review_only: bool = False):
+        rules.append({
+            "vaccine": vaccine,
+            "milestone": milestone,
+            "explanation": explanation,
+            "aliases": aliases or [vaccine],
+            "review_only": review_only,
+        })
+
+    if months >= 0:
+        add("Hepatitis B", "Nacimiento", "Dosis neonatal dentro de las primeras 12 horas de vida.")
+        add("BCG", "Nacimiento", "Dosis antes del egreso de la maternidad.")
+    if months >= 2:
+        add("Neumococo", "2 meses", "Primera dosis del esquema infantil.")
+        add("Polio", "2 meses", "Primera dosis del esquema infantil.", ["Polio", "IPV", "Salk"])
+        add("Quíntuple", "2 meses", "Primera dosis del esquema infantil.", ["Quíntuple", "Pentavalente"])
+        add("Rotavirus", "2 meses", "Primera dosis dentro de la edad máxima permitida.")
+    if months >= 3:
+        add("Meningococo", "3 meses", "Primera dosis del esquema infantil.")
+    if months >= 4:
+        add("Neumococo", "4 meses", "Segunda dosis del esquema infantil.")
+        add("Polio", "4 meses", "Segunda dosis del esquema infantil.", ["Polio", "IPV", "Salk"])
+        add("Quíntuple", "4 meses", "Segunda dosis del esquema infantil.", ["Quíntuple", "Pentavalente"])
+        add("Rotavirus", "4 meses", "Segunda dosis dentro de la edad máxima permitida.")
+    if months >= 5:
+        add("Meningococo", "5 meses", "Segunda dosis del esquema infantil.")
+    if months >= 6:
+        add("Polio", "6 meses", "Tercera dosis del esquema infantil.", ["Polio", "IPV", "Salk"])
+        add("Quíntuple", "6 meses", "Tercera dosis del esquema infantil.", ["Quíntuple", "Pentavalente"])
+        if months < 24:
+            add("Antigripal", "6 a 24 meses", "Vacunación anual; la cantidad inicial de dosis depende de antecedentes.", review_only=True)
+    if months >= 12:
+        add("Neumococo", "12 meses", "Refuerzo del esquema infantil.")
+        add("Hepatitis A", "12 meses", "Una dosis del Calendario Nacional.")
+        add("Triple viral", "12 meses", "Primera dosis.", ["Triple viral", "SRP"])
+    if months >= 15:
+        add("Meningococo", "15 meses", "Dosis de refuerzo.")
+        add("Varicela", "15 meses", "Primera dosis.")
+        add("Triple viral", "15 a 18 meses", "Segunda dosis según el calendario 2026.", ["Triple viral", "SRP"])
+        add("Quíntuple", "15 a 18 meses", "Refuerzo del esquema infantil.", ["Quíntuple", "Pentavalente"])
+    if years >= 5:
+        add("Polio", "5 años", "Refuerzo correspondiente al ingreso escolar.", ["Polio", "IPV", "Salk"])
+        add("Triple bacteriana celular", "5 años", "Refuerzo correspondiente al ingreso escolar.", ["Triple bacteriana celular", "DPT"])
+        add("Triple viral", "5 años", "Revisar cohorte y esquema previo; algunas cohortes continúan con vacunación a esta edad.", ["Triple viral", "SRP"], review_only=True)
+        add("Varicela", "5 años", "Revisar y completar el esquema según cohorte y antecedentes.", review_only=True)
+    if years >= 11:
+        add("VPH", "11 años", "Una única dosis según el Calendario Nacional.", ["VPH", "HPV"])
+        add("Meningococo", "11 años", "Una única dosis.")
+        add("Triple bacteriana acelular", "11 años", "Una única dosis.", ["Triple bacteriana acelular", "dTpa"])
+    if 15 <= years < 65:
+        add("Doble bacteriana", "15 a 64 años", "Revisar esquema básico y refuerzo cada 10 años.", ["Doble bacteriana", "dT"], review_only=True)
+        add("Doble o triple viral", "15 a 64 años", "Verificar dos dosis posteriores al año de vida según cohorte y antecedentes.", ["Triple viral", "Doble viral", "SRP", "SR"], review_only=True)
+        add("Antigripal", "15 a 64 años", "Corresponde anualmente en grupos con indicación específica.", review_only=True)
+        add("Fiebre Hemorrágica Argentina", "Desde 15 años", "Revisar indicación por residencia o trabajo en zona endémica.", ["Fiebre Hemorrágica Argentina", "Candid 1"], review_only=True)
+    if years >= 65:
+        add("Antigripal", "65 años o más", "Una dosis anual.")
+        add("Neumococo", "65 años o más", "Revisar esquema vigente y antecedentes.", review_only=True)
+        add("Doble bacteriana", "65 años o más", "Completar esquema y refuerzo cada 10 años.", ["Doble bacteriana", "dT"], review_only=True)
+
+    return rules
+
+
+def _calendar_assessment(birth_date, records: list) -> tuple[dict, list[dict]]:
+    age = _age_detail(birth_date)
+    results = []
+    for rule in _calendar_rules_for_age(age):
+        matches = [
+            record for record in records
+            if _record_matches_vaccine(record.get("vaccine_name"), rule["aliases"])
+        ]
+        if matches:
+            status = "Registrada"
+            detail = f"{len(matches)} aplicación/es encontrada/s en esta plataforma."
+        elif rule["review_only"]:
+            status = "Revisar"
+            detail = "La indicación depende de antecedentes, cohorte, riesgo o intervalos."
+        else:
+            status = "Sin registro"
+            detail = "No se encontró una aplicación compatible en esta plataforma."
+        results.append({**rule, "status": status, "detail": detail})
+    return age, results
+
+
+def render_intelligent_calendar(citizen: dict, records: list) -> None:
+    birth_date = _parse_iso_date(citizen.get("birth_date"))
+    st.markdown("### Calendario Nacional Inteligente")
+    st.caption(
+        "Comparación documental con el Calendario Nacional 2026. No reemplaza el carnet, "
+        "la evaluación clínica, la validación de intervalos ni los sistemas oficiales."
+    )
+
+    if not birth_date:
+        st.warning("No se puede analizar el calendario porque la fecha de nacimiento no es válida.")
+        return
+
+    age, assessment = _calendar_assessment(birth_date, records)
+    registered = sum(item["status"] == "Registrada" for item in assessment)
+    missing = sum(item["status"] == "Sin registro" for item in assessment)
+    review = sum(item["status"] == "Revisar" for item in assessment)
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Edad", age["label"])
+    m2.metric("Registradas", registered)
+    m3.metric("Sin registro", missing)
+    m4.metric("Revisar", review)
+
+    st.markdown(
+        '<div class="decision-panel"><strong>Interpretación profesional</strong>'
+        '<p>“Sin registro” significa únicamente que no existe una coincidencia en esta base. '
+        'No confirma que la dosis esté pendiente. Antes de actuar, verificá carnet, NOMIVAC/SISA, '
+        'antecedentes, cohorte, intervalos mínimos, condiciones clínicas y lineamientos vigentes.</p></div>',
+        unsafe_allow_html=True,
+    )
+
+    status_filter = st.multiselect(
+        "Mostrar estados",
+        ["Sin registro", "Revisar", "Registrada"],
+        default=["Sin registro", "Revisar", "Registrada"],
+        key=f'intelligent_calendar_filter_{citizen.get("id", "citizen")}',
+    )
+    visible = [item for item in assessment if item["status"] in status_filter]
+
+    rows = [
+        {
+            "Estado": item["status"],
+            "Vacuna": item["vaccine"],
+            "Hito": item["milestone"],
+            "Fundamento": item["explanation"],
+            "Lectura del sistema": item["detail"],
+        }
+        for item in visible
+    ]
+    if rows:
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No hay resultados para los estados seleccionados.")
+
+    with st.expander("Criterios y límites del análisis", expanded=False):
+        st.write(
+            "El motor identifica coincidencias por denominación de vacuna y edad cronológica. "
+            "No determina validez de dosis, intervalos, recuperación de esquemas, indicaciones por "
+            "embarazo, inmunocompromiso, exposición, viaje, ocupación, residencia o factores de riesgo."
+        )
+        st.link_button(
+            "Consultar Calendario Nacional 2026",
+            "https://www.argentina.gob.ar/salud/vacunas",
+            use_container_width=True,
+            key=f'intelligent_calendar_source_{citizen.get("id", "citizen")}',
+        )
+
 def render_nominal_registry() -> None:
     heading(
         "Gestión institucional",
@@ -4657,6 +4862,8 @@ def render_nominal_registry() -> None:
     if not history_ok:
         st.error(history_error)
         records = []
+
+    render_intelligent_calendar(citizen, records)
 
     st.markdown("### 2. Registrar aplicación")
     st.caption(
