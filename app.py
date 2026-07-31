@@ -4462,6 +4462,50 @@ def _create_vaccination_record(payload: dict) -> tuple[bool, dict | str]:
     return False, "Supabase no devolvió el registro creado."
 
 
+def _update_citizen(citizen_id: str, payload: dict) -> tuple[bool, dict | str]:
+    ok, result = _supabase_rest(
+        "PATCH",
+        table=SUPABASE_CITIZENS_TABLE,
+        params={"id": f"eq.{citizen_id}"},
+        payload=payload,
+        admin=True,
+    )
+    if not ok:
+        return False, f"No fue posible actualizar la persona: {result}"
+    if isinstance(result, list) and result:
+        return True, result[0]
+    return False, "Supabase no devolvió el registro actualizado."
+
+
+def _update_vaccination_record(record_id: str, payload: dict) -> tuple[bool, dict | str]:
+    ok, result = _supabase_rest(
+        "PATCH",
+        table=SUPABASE_VACCINATION_RECORDS_TABLE,
+        params={"id": f"eq.{record_id}"},
+        payload=payload,
+        admin=True,
+    )
+    if not ok:
+        return False, f"No fue posible actualizar la aplicación: {result}"
+    if isinstance(result, list) and result:
+        return True, result[0]
+    return False, "Supabase no devolvió la aplicación actualizada."
+
+
+def _annul_vaccination_record(record_id: str, reason: str) -> tuple[bool, dict | str]:
+    payload = {
+        "status": "Anulado",
+        "annulment_reason": reason.strip(),
+        "annulled_at": datetime.now(timezone.utc).isoformat(),
+        "annulled_by": str(st.session_state.get("institutional_user") or "Administración"),
+    }
+    return _update_vaccination_record(record_id, payload)
+
+
+def _record_is_active(record: dict) -> bool:
+    return str(record.get("status") or "Activo").strip().casefold() != "anulado"
+
+
 def _parse_iso_date(value: object):
     try:
         return datetime.strptime(str(value), "%Y-%m-%d").date()
@@ -4954,6 +4998,76 @@ def render_nominal_registry() -> None:
         )
         st.caption(f"Edad calculada al día de hoy: {age_years} años.")
 
+    with st.expander("Editar datos de la persona", expanded=False):
+        with st.form(f"nominal_edit_citizen_{citizen_id}"):
+            e1, e2 = st.columns(2)
+            with e1:
+                edit_first_name = st.text_input("Nombre", value=str(citizen.get("first_name") or ""))
+                edit_birth_date = st.date_input(
+                    "Fecha de nacimiento",
+                    value=birth_date_value,
+                    min_value=datetime(1900, 1, 1).date(),
+                    max_value=datetime.now().date(),
+                )
+                edit_phone = st.text_input("Teléfono", value=str(citizen.get("phone") or ""))
+                edit_address = st.text_input("Domicilio", value=str(citizen.get("address") or ""))
+            with e2:
+                edit_last_name = st.text_input("Apellido", value=str(citizen.get("last_name") or ""))
+                sex_options = ["No informado", "Femenino", "Masculino", "X / Otro"]
+                current_sex = str(citizen.get("sex_registered") or "No informado")
+                edit_sex = st.selectbox(
+                    "Sexo registrado",
+                    sex_options,
+                    index=sex_options.index(current_sex) if current_sex in sex_options else 0,
+                )
+                edit_email = st.text_input("Correo electrónico", value=str(citizen.get("email") or ""))
+                edit_locality = st.text_input("Localidad", value=str(citizen.get("locality") or "San Francisco"))
+            edit_observations = st.text_area(
+                "Observaciones", value=str(citizen.get("observations") or ""), height=90
+            )
+            edit_reason = st.text_input(
+                "Motivo de la modificación",
+                placeholder="Obligatorio para la trazabilidad",
+            )
+            save_citizen_changes = st.form_submit_button(
+                "Guardar cambios", use_container_width=True
+            )
+
+        if save_citizen_changes:
+            if not edit_first_name.strip() or not edit_last_name.strip() or edit_birth_date is None:
+                st.error("Completá nombre, apellido y fecha de nacimiento.")
+            elif edit_email.strip() and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", edit_email.strip()):
+                st.error("El correo electrónico no tiene un formato válido.")
+            elif not edit_reason.strip():
+                st.error("Ingresá el motivo de la modificación.")
+            else:
+                update_payload = {
+                    "first_name": edit_first_name.strip(),
+                    "last_name": edit_last_name.strip(),
+                    "birth_date": edit_birth_date.isoformat(),
+                    "sex_registered": None if edit_sex == "No informado" else edit_sex,
+                    "phone": edit_phone.strip() or None,
+                    "email": edit_email.strip().lower() or None,
+                    "address": edit_address.strip() or None,
+                    "locality": edit_locality.strip() or None,
+                    "observations": edit_observations.strip() or None,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "updated_by": str(st.session_state.get("institutional_user") or "Administración"),
+                }
+                ok, result = _update_citizen(citizen_id, update_payload)
+                if ok and isinstance(result, dict):
+                    _record_audit(
+                        "Modificar ciudadano",
+                        "citizen",
+                        citizen_id,
+                        {"motivo": edit_reason.strip(), "campos": list(update_payload.keys())},
+                    )
+                    st.session_state.nominal_selected_citizen = result
+                    st.success("Datos actualizados correctamente.")
+                    st.rerun()
+                else:
+                    st.error(str(result))
+
     if st.button("Buscar otra persona", use_container_width=True, key="nominal_clear_selection"):
         st.session_state.nominal_selected_citizen = None
         st.session_state.nominal_last_document = ""
@@ -4964,7 +5078,8 @@ def render_nominal_registry() -> None:
         st.error(history_error)
         records = []
 
-    render_intelligent_calendar(citizen, records)
+    active_records = [record for record in records if _record_is_active(record)]
+    render_intelligent_calendar(citizen, active_records)
 
     st.markdown("### 2. Registrar aplicación")
     st.caption(
@@ -5034,7 +5149,7 @@ def render_nominal_registry() -> None:
                 "vaccinator_registration": vaccinator_registration.strip() or None,
                 "observations": record_observations.strip() or None,
             }
-            if _is_duplicate_vaccination(payload, records):
+            if _is_duplicate_vaccination(payload, active_records):
                 st.error(
                     "Ya existe una aplicación con la misma vacuna, dosis, fecha y lote. "
                     "No se guardó un registro duplicado."
@@ -5053,13 +5168,14 @@ def render_nominal_registry() -> None:
                 else:
                     st.error(str(result))
 
-    st.markdown("### 3. Historial de vacunación")
+    st.markdown("### 3. Historial y trazabilidad")
     if not history_ok:
         st.error(history_error)
     elif not records:
         st.info("La persona todavía no tiene aplicaciones registradas.")
     else:
         history_rows = [{
+            "Estado": record.get("status") or "Activo",
             "Fecha": record.get("application_date", ""),
             "Vacuna": record.get("vaccine_name", ""),
             "Dosis": record.get("dose_number", ""),
@@ -5068,6 +5184,167 @@ def render_nominal_registry() -> None:
             "Vacunador/a": record.get("vaccinator_name", ""),
         } for record in records]
         st.dataframe(pd.DataFrame(history_rows), use_container_width=True, hide_index=True)
+
+        record_options = {
+            f"{record.get('application_date', '')} · {record.get('vaccine_name', '')} · {record.get('dose_number', '')} · {record.get('status') or 'Activo'}": record
+            for record in records
+        }
+        selected_record_label = st.selectbox(
+            "Seleccionar aplicación para revisar",
+            list(record_options.keys()),
+            key=f"nominal_record_selector_{citizen_id}",
+        )
+        selected_record = record_options[selected_record_label]
+        selected_record_id = str(selected_record.get("id", ""))
+        selected_active = _record_is_active(selected_record)
+
+        detail_col_1, detail_col_2 = st.columns(2)
+        with detail_col_1:
+            st.write(f"**Vacuna:** {selected_record.get('vaccine_name', '')}")
+            st.write(f"**Dosis:** {selected_record.get('dose_number', '')}")
+            st.write(f"**Fecha:** {selected_record.get('application_date', '')}")
+            st.write(f"**Lote:** {selected_record.get('batch_number', '')}")
+        with detail_col_2:
+            st.write(f"**Estado:** {selected_record.get('status') or 'Activo'}")
+            st.write(f"**Establecimiento:** {selected_record.get('establishment', '')}")
+            st.write(f"**Vacunador/a:** {selected_record.get('vaccinator_name') or 'No informado'}")
+            st.write(f"**Matrícula:** {selected_record.get('vaccinator_registration') or 'No informada'}")
+
+        if not selected_active:
+            st.warning(
+                "Esta aplicación está anulada y no se utiliza para el Calendario Inteligente. "
+                f"Motivo: {selected_record.get('annulment_reason') or 'No informado'}."
+            )
+        else:
+            with st.expander("Corregir aplicación", expanded=False):
+                current_application_date = _parse_iso_date(selected_record.get("application_date")) or datetime.now().date()
+                current_expiration_date = _parse_iso_date(selected_record.get("expiration_date"))
+                with st.form(f"edit_vaccination_{selected_record_id}"):
+                    v1, v2, v3 = st.columns(3)
+                    with v1:
+                        edit_vaccine_name = st.text_input("Vacuna", value=str(selected_record.get("vaccine_name") or ""))
+                        edit_dose_number = st.text_input("Dosis", value=str(selected_record.get("dose_number") or ""))
+                        edit_application_date = st.date_input(
+                            "Fecha de aplicación", value=current_application_date, max_value=datetime.now().date()
+                        )
+                    with v2:
+                        edit_batch = st.text_input("Lote", value=str(selected_record.get("batch_number") or ""))
+                        edit_expiration = st.date_input("Vencimiento del lote", value=current_expiration_date)
+                        edit_laboratory = st.text_input("Laboratorio", value=str(selected_record.get("laboratory") or ""))
+                    with v3:
+                        edit_establishment = st.text_input("Establecimiento", value=str(selected_record.get("establishment") or ""))
+                        edit_record_locality = st.text_input("Localidad", value=str(selected_record.get("locality") or ""))
+                        edit_route = st.text_input("Vía", value=str(selected_record.get("administration_route") or ""))
+                    edit_site = st.text_input("Sitio anatómico", value=str(selected_record.get("anatomical_site") or ""))
+                    edit_record_observations = st.text_area(
+                        "Observaciones", value=str(selected_record.get("observations") or ""), height=90
+                    )
+                    correction_reason = st.text_input(
+                        "Motivo de la corrección", placeholder="Obligatorio"
+                    )
+                    confirm_correction = st.checkbox(
+                        "Confirmo que revisé la documentación respaldatoria."
+                    )
+                    save_correction = st.form_submit_button(
+                        "Guardar corrección", use_container_width=True
+                    )
+
+                if save_correction:
+                    if not edit_vaccine_name.strip() or not edit_dose_number.strip() or not edit_batch.strip() or not edit_establishment.strip():
+                        st.error("Completá vacuna, dosis, lote y establecimiento.")
+                    elif birth_date_value and edit_application_date < birth_date_value:
+                        st.error("La fecha de aplicación no puede ser anterior al nacimiento.")
+                    elif edit_expiration and edit_expiration < edit_application_date:
+                        st.error("El lote figura vencido para la fecha de aplicación.")
+                    elif not correction_reason.strip():
+                        st.error("Ingresá el motivo de la corrección.")
+                    elif not confirm_correction:
+                        st.error("Debés confirmar la revisión documental.")
+                    else:
+                        correction_payload = {
+                            "vaccine_name": edit_vaccine_name.strip(),
+                            "dose_number": edit_dose_number.strip(),
+                            "application_date": edit_application_date.isoformat(),
+                            "batch_number": edit_batch.strip(),
+                            "expiration_date": edit_expiration.isoformat() if edit_expiration else None,
+                            "laboratory": edit_laboratory.strip() or None,
+                            "establishment": edit_establishment.strip(),
+                            "locality": edit_record_locality.strip() or None,
+                            "administration_route": edit_route.strip() or None,
+                            "anatomical_site": edit_site.strip() or None,
+                            "observations": edit_record_observations.strip() or None,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                            "updated_by": str(st.session_state.get("institutional_user") or "Administración"),
+                            "correction_reason": correction_reason.strip(),
+                        }
+                        ok, result = _update_vaccination_record(selected_record_id, correction_payload)
+                        if ok:
+                            _record_audit(
+                                "Corregir aplicación",
+                                "vaccination_record",
+                                selected_record_id,
+                                {
+                                    "citizen_id": citizen_id,
+                                    "motivo": correction_reason.strip(),
+                                    "antes": {
+                                        "vacuna": selected_record.get("vaccine_name"),
+                                        "dosis": selected_record.get("dose_number"),
+                                        "fecha": selected_record.get("application_date"),
+                                        "lote": selected_record.get("batch_number"),
+                                    },
+                                    "después": {
+                                        "vacuna": correction_payload["vaccine_name"],
+                                        "dosis": correction_payload["dose_number"],
+                                        "fecha": correction_payload["application_date"],
+                                        "lote": correction_payload["batch_number"],
+                                    },
+                                },
+                            )
+                            st.success("Aplicación corregida y auditada.")
+                            st.rerun()
+                        else:
+                            st.error(str(result))
+
+            with st.expander("Anular aplicación", expanded=False):
+                st.warning(
+                    "La anulación no elimina el registro. Conserva la trazabilidad y excluye la dosis del análisis clínico."
+                )
+                with st.form(f"annul_vaccination_{selected_record_id}"):
+                    annul_reason = st.text_area(
+                        "Motivo de anulación",
+                        placeholder="Ej.: carga duplicada, identidad incorrecta o error documental",
+                        height=90,
+                    )
+                    annul_confirmation = st.checkbox(
+                        "Confirmo que la aplicación seleccionada debe quedar anulada."
+                    )
+                    annul_submit = st.form_submit_button(
+                        "Anular aplicación", use_container_width=True
+                    )
+                if annul_submit:
+                    if len(annul_reason.strip()) < 8:
+                        st.error("Ingresá un motivo de anulación suficientemente descriptivo.")
+                    elif not annul_confirmation:
+                        st.error("Debés confirmar la anulación.")
+                    else:
+                        ok, result = _annul_vaccination_record(selected_record_id, annul_reason)
+                        if ok:
+                            _record_audit(
+                                "Anular aplicación",
+                                "vaccination_record",
+                                selected_record_id,
+                                {
+                                    "citizen_id": citizen_id,
+                                    "motivo": annul_reason.strip(),
+                                    "vacuna": selected_record.get("vaccine_name"),
+                                    "dosis": selected_record.get("dose_number"),
+                                },
+                            )
+                            st.success("Aplicación anulada y conservada para auditoría.")
+                            st.rerun()
+                        else:
+                            st.error(str(result))
+
 
 def _institutional_users() -> dict:
     """Lee usuarios institucionales desde .streamlit/secrets.toml sin exponer credenciales."""
